@@ -1,0 +1,57 @@
+import express from 'express'
+import multer from 'multer'
+import {
+  getLeads,
+  getSalesRepsList,
+  uploadLeads,
+  pasteLeads,
+  assignLeads,
+  autoAssignLeads,
+  unassignLeads,
+  updateLeadStatus,
+  createLead,
+} from '../controllers/leadController.js'
+
+const router = express.Router()
+
+// Multer memory storage configuration for file uploads (xlsx, xls, csv, tsv)
+const storage = multer.memoryStorage()
+const upload = multer({
+  storage,
+  limits: { fileSize: 25 * 1024 * 1024 }, // 25MB limit
+  fileFilter: (req, file, cb) => {
+    const ext = file.originalname.toLowerCase()
+    if (
+      ext.endsWith('.xlsx') ||
+      ext.endsWith('.xls') ||
+      ext.endsWith('.csv') ||
+      ext.endsWith('.tsv') ||
+      file.mimetype.includes('spreadsheet') ||
+      file.mimetype.includes('excel') ||
+      file.mimetype.includes('csv')
+    ) {
+      cb(null, true)
+    } else {
+      cb(null, true) // Accept anyway and let XLSX parser handle it gracefully
+    }
+  },
+})
+
+// Query & Read
+router.get('/', getLeads)
+router.get('/reps', getSalesRepsList)
+
+// Create & Ingestion
+router.post('/', createLead)
+router.post('/upload', upload.single('file'), uploadLeads)
+router.post('/paste', pasteLeads)
+
+// Assignment Engine
+router.post('/assign', assignLeads)
+router.post('/auto-assign', autoAssignLeads)
+router.post('/unassign', unassignLeads)
+
+// Status & Follow-ups
+router.patch('/:id/status', updateLeadStatus)
+
+export default router
