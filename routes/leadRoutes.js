@@ -10,6 +10,7 @@ import {
   unassignLeads,
   updateLeadStatus,
   createLead,
+  resetLeadDatabase,
 } from '../controllers/leadController.js'
 
 const router = express.Router()
@@ -53,5 +54,8 @@ router.post('/unassign', unassignLeads)
 
 // Status & Follow-ups
 router.patch('/:id/status', updateLeadStatus)
+
+// Temporary Reset / Clean Lead Database Tool
+router.post('/reset-db', resetLeadDatabase)
 
 export default router

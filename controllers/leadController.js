@@ -2,6 +2,7 @@ import mongoose from 'mongoose'
 import Lead from '../models/Lead.js'
 import User from '../models/User.js'
 import { parseLeadsData, sanitizePhone } from '../utils/leadParser.js'
+import { seedDatabase } from '../scripts/seedDB.js'
 
 // -------------------------------------------------------------
 // GET /api/leads (Supports backend pagination by 30)
@@ -621,6 +622,36 @@ export const createLead = async (req, res) => {
     res.status(201).json({
       success: true,
       lead: { ...saved.toObject(), id: saved._id.toString() },
+    })
+  } catch (error) {
+    res.status(500).json({ success: false, message: error.message })
+  }
+}
+
+// -------------------------------------------------------------
+// POST /api/leads/reset-db (Temporary tool to clean / reset lead database)
+// -------------------------------------------------------------
+export const resetLeadDatabase = async (req, res) => {
+  try {
+    const { mode } = req.body // 'clean' to wipe all leads, or 'reseed' to restore default 34 leads
+
+    if (mode === 'clean') {
+      const deleteResult = await Lead.deleteMany({})
+      return res.status(200).json({
+        success: true,
+        message: `Database cleaned: Deleted ${deleteResult.deletedCount} leads. The database is now empty.`,
+        deletedCount: deleteResult.deletedCount,
+        leadsCount: 0,
+      })
+    }
+
+    // Default 'reseed' mode
+    await seedDatabase(true)
+    const count = await Lead.countDocuments()
+    return res.status(200).json({
+      success: true,
+      message: `Database reset & reseeded successfully! Restored ${count} initial Meta leads.`,
+      leadsCount: count,
     })
   } catch (error) {
     res.status(500).json({ success: false, message: error.message })
