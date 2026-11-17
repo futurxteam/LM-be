@@ -7,6 +7,8 @@ import {
   syncLeads,
   testTelegramAlert,
   testWebhookAlert,
+  previewFormLeads,
+  importSelectedLeads,
 } from '../controllers/metaController.js'
 
 const router = express.Router()
@@ -19,5 +21,8 @@ router.post('/sync', syncLeads)
 router.post('/sync-leads', syncLeads) // Alias for convenience
 router.post('/test-telegram', testTelegramAlert)
 router.post('/test-webhook', testWebhookAlert)
+router.post('/preview-form-leads', previewFormLeads)
+router.post('/import-selected-leads', importSelectedLeads)
 
 export default router
+

@@ -1,5 +1,7 @@
 import axios from 'axios'
 import MetaIntegration from '../models/MetaIntegration.js'
+import Lead from '../models/Lead.js'
+import { extractLeadFromRow, sanitizePhone } from '../utils/leadParser.js'
 import { syncMetaLeads } from '../services/metaLeadService.js'
 
 function maskToken(token) {
@@ -327,3 +329,176 @@ export const testWebhookAlert = async (req, res) => {
     res.status(500).json({ success: false, message: `Webhook error: ${err.message}` })
   }
 }
+
+// -------------------------------------------------------------
+// POST /api/meta/preview-form-leads - Preview leads from a specific form
+// -------------------------------------------------------------
+export const previewFormLeads = async (req, res) => {
+  try {
+    const { formId } = req.body
+    if (!formId) {
+      return res.status(400).json({ success: false, message: 'formId is required' })
+    }
+
+    const config = await MetaIntegration.findOne()
+    const token = config?.accessToken || process.env.META_PAGE_ACCESS_TOKEN
+    const graphVersion = config?.graphVersion || process.env.META_GRAPH_VERSION || 'v21.0'
+
+    if (!token) {
+      return res.status(400).json({ success: false, message: 'No Meta Page Access Token configured' })
+    }
+
+    const formConfig = config?.selectedForms?.find(f => f.formId === String(formId))
+    const formName = formConfig?.formName || 'Meta Lead Form'
+
+    // Fetch leads from Meta Graph API
+    const response = await axios.get(`https://graph.facebook.com/${graphVersion}/${formId}/leads`, {
+      params: {
+        access_token: token,
+        fields: 'id,created_time,form_id,ad_id,ad_name,campaign_name,platform,field_data',
+        limit: 100,
+      },
+      timeout: 15000,
+    })
+
+    const rawLeads = response.data.data || []
+    const parsedLeads = []
+
+    for (const raw of rawLeads) {
+      const rowData = {
+        id: raw.id,
+        created_time: raw.created_time,
+        ad_id: raw.ad_id,
+        ad_name: raw.ad_name,
+        campaign_name: raw.campaign_name,
+        form_id: raw.form_id || formId,
+        form_name: formName,
+        platform: raw.platform || 'Instagram',
+      }
+
+      if (Array.isArray(raw.field_data)) {
+        for (const field of raw.field_data) {
+          if (field.name) {
+            rowData[field.name] = (field.values && field.values[0]) || ''
+          }
+        }
+      }
+
+      const parsed = extractLeadFromRow(rowData)
+      if (!parsed) continue
+
+      const cleanPhone = sanitizePhone(parsed.phone)
+
+      // Check if already exists in MongoDB
+      const existing = await Lead.findOne({
+        $or: [
+          { metaLeadId: parsed.metaLeadId },
+          ...(cleanPhone ? [{ phone: cleanPhone }] : []),
+        ],
+      })
+
+      parsedLeads.push({
+        metaLeadId: parsed.metaLeadId,
+        fullName: parsed.fullName || 'Unknown Candidate',
+        phone: cleanPhone || parsed.phone,
+        email: parsed.email || '',
+        qualification: parsed.qualification || 'Other / Not Specified',
+        preferredLocation: parsed.preferredLocation || 'Anywhere',
+        learningMode: parsed.learningMode || 'Offline Class',
+        formId,
+        formName,
+        campaignName: parsed.campaignName || 'Meta Ads',
+        createdTime: parsed.createdTime,
+        isExistingInDb: !!existing,
+        existingLeadId: existing?._id,
+        existingStatus: existing?.status,
+        existingAssignment: existing?.assignedTo ? existing.assignedTo.repName : null,
+      })
+    }
+
+    res.status(200).json({
+      success: true,
+      formId,
+      formName,
+      totalFetched: parsedLeads.length,
+      newCount: parsedLeads.filter(l => !l.isExistingInDb).length,
+      existingCount: parsedLeads.filter(l => l.isExistingInDb).length,
+      leads: parsedLeads,
+    })
+  } catch (err) {
+    const errorMsg = err.response?.data?.error?.message || err.message
+    res.status(500).json({ success: false, message: `Failed to preview leads: ${errorMsg}` })
+  }
+}
+
+// -------------------------------------------------------------
+// POST /api/meta/import-selected-leads - Ingest selected leads to Pool
+// -------------------------------------------------------------
+export const importSelectedLeads = async (req, res) => {
+  try {
+    const { leads } = req.body
+    if (!Array.isArray(leads) || leads.length === 0) {
+      return res.status(400).json({ success: false, message: 'Leads array is required' })
+    }
+
+    let addedCount = 0
+    let skippedCount = 0
+
+    for (const leadData of leads) {
+      const cleanPhone = sanitizePhone(leadData.phone)
+
+      // Duplicate check
+      const existing = await Lead.findOne({
+        $or: [
+          { metaLeadId: leadData.metaLeadId },
+          ...(cleanPhone ? [{ phone: cleanPhone }] : []),
+        ],
+      })
+
+      if (existing) {
+        skippedCount++
+        continue
+      }
+
+      const newLead = new Lead({
+        metaLeadId: leadData.metaLeadId,
+        fullName: leadData.fullName || 'Unknown Candidate',
+        phone: cleanPhone || leadData.phone,
+        email: leadData.email,
+        qualification: leadData.qualification,
+        preferredLocation: leadData.preferredLocation,
+        learningMode: leadData.learningMode,
+        formName: leadData.formName,
+        campaignName: leadData.campaignName || 'Meta Ads',
+        createdTime: leadData.createdTime ? new Date(leadData.createdTime) : new Date(),
+        assignmentStatus: 'UNASSIGNED',
+        assignedTo: null,
+        status: 'Not Contacted',
+        subStatus: 'New Lead In Pool',
+        callAttempts: 0,
+        notes: [
+          {
+            text: `Imported via UI Form Preview from: "${leadData.formName}"`,
+            author: 'Admin Manual Select',
+            status: 'Not Contacted',
+            subStatus: 'New Lead In Pool',
+            timestamp: new Date(),
+          },
+        ],
+      })
+
+      await newLead.save()
+      addedCount++
+    }
+
+    res.status(200).json({
+      success: true,
+      addedCount,
+      skippedCount,
+      message: `Successfully added ${addedCount} lead(s) to unassigned pool (${skippedCount} existing skipped).`,
+    })
+  } catch (err) {
+    res.status(500).json({ success: false, message: err.message })
+  }
+}
+

@@ -31,3 +31,4 @@ export function startMetaCron() {
 
   console.log('🚀 Meta lead sync scheduled (runs every 15 minutes).')
 }
+
