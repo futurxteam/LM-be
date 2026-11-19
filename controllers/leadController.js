@@ -4,6 +4,7 @@ import User from '../models/User.js'
 import MetaIntegration from '../models/MetaIntegration.js'
 import { parseLeadsData, sanitizePhone } from '../utils/leadParser.js'
 import { seedDatabase } from '../scripts/seedDB.js'
+import { allocateLead } from '../services/allocationService.js'
 
 // -------------------------------------------------------------
 // GET /api/leads (Supports backend pagination by 30)
@@ -130,6 +131,20 @@ export const getSalesRepsList = async (req, res) => {
           subStatus: { $regex: /enrolled/i },
         })
 
+        const completedCount = await Lead.countDocuments({
+          'assignedTo.repId': repId,
+          isCompleted: true,
+        })
+        const droppedCount = await Lead.countDocuments({
+          'assignedTo.repId': repId,
+          isDropped: true,
+        })
+        const activeCount = await Lead.countDocuments({
+          'assignedTo.repId': repId,
+          isCompleted: { $ne: true },
+          isDropped: { $ne: true },
+        })
+
         const contactRate = assignedCount > 0 ? Math.round((contactedCount / assignedCount) * 100) : 0
 
         return {
@@ -142,8 +157,13 @@ export const getSalesRepsList = async (req, res) => {
           specialty: rep.specialty,
           avatar: rep.avatar,
           active: rep.active,
+          groupId: rep.groupId || null,
+          isGroupManager: Boolean(rep.isGroupManager),
           totalAssigned: assignedCount,
           assignedCount,
+          activeCount,
+          completedCount,
+          droppedCount,
           contactedCount,
           notContactedCount,
           enrolledCount,
@@ -539,7 +559,7 @@ export const unassignLeads = async (req, res) => {
 export const updateLeadStatus = async (req, res) => {
   try {
     const { id } = req.params
-    const { status, subStatus, note, callbackAt, incrementCallAttempt, author } = req.body
+    const { status, subStatus, note, callbackAt, incrementCallAttempt, author, isCompleted, isDropped, droppedReason } = req.body
 
     const lead = await Lead.findById(id)
     if (!lead) {
@@ -554,10 +574,35 @@ export const updateLeadStatus = async (req, res) => {
       lead.callAttempts = (lead.callAttempts || 0) + 1
     }
 
+    // Lifecycle states: Dropped vs Completed
+    if (isCompleted !== undefined) {
+      lead.isCompleted = Boolean(isCompleted)
+      if (lead.isCompleted) {
+        lead.isDropped = false
+        lead.completedAt = new Date()
+      }
+    } else if (subStatus && /enrolled/i.test(subStatus)) {
+      lead.isCompleted = true
+      lead.isDropped = false
+      lead.completedAt = lead.completedAt || new Date()
+    }
+
+    if (isDropped !== undefined) {
+      lead.isDropped = Boolean(isDropped)
+      if (lead.isDropped) {
+        lead.isCompleted = false
+        lead.droppedReason = droppedReason || note || 'Lead dropped / lost'
+      }
+    } else if (subStatus && /dropped|not interested|lost|junk|invalid/i.test(subStatus)) {
+      lead.isDropped = true
+      lead.isCompleted = false
+      lead.droppedReason = lead.droppedReason || subStatus
+    }
+
     if (note && note.trim()) {
       lead.notes.unshift({
         text: note.trim(),
-        author: author || lead.assignedTo?.repName || 'Sales Counselor',
+        author: author || lead.assignedTo?.repName || 'Admissions Counselor',
         status: lead.status,
         subStatus: lead.subStatus,
         timestamp: new Date(),
@@ -582,38 +627,114 @@ export const updateLeadStatus = async (req, res) => {
 }
 
 // -------------------------------------------------------------
-// POST /api/leads (Single manual lead creation)
+// POST /api/leads (Manual lead typing / direct creation)
 // -------------------------------------------------------------
 export const createLead = async (req, res) => {
   try {
+    const {
+      fullName,
+      name,
+      phone,
+      email,
+      qualification,
+      age,
+      state,
+      otherState,
+      district,
+      courseProgram,
+      courseVariant,
+      customerCategory,
+      assignMode,
+      assignedTo,
+      groupId,
+      formId,
+      status,
+      subStatus,
+      author,
+    } = req.body
+
+    const nameVal = (fullName || name || '').trim()
+    if (!nameVal) {
+      return res.status(400).json({ success: false, message: 'Name is required' })
+    }
+
+    // Determine Assignment:
+    // If explicitly set to 'pool', keep UNASSIGNED.
+    // If specific counselor passed, assign directly.
+    // Default: Run capacity-aware round-robin to assign directly to counselor's personal queue!
+    let leadAssignmentStatus = 'UNASSIGNED'
+    let leadAssignedTo = null
+    let leadGroupId = groupId || null
+
+    if (assignMode === 'pool') {
+      leadAssignmentStatus = 'UNASSIGNED'
+      leadAssignedTo = null
+      leadGroupId = null
+    } else if (assignedTo && (assignedTo.repId || assignedTo.id)) {
+      const repId = assignedTo.repId || assignedTo.id
+      const counselor = await User.findById(repId)
+      leadAssignmentStatus = 'ASSIGNED'
+      leadAssignedTo = {
+        repId: counselor ? counselor._id : repId,
+        repName: counselor ? counselor.name : assignedTo.repName || 'Admissions Counselor',
+        repRole: counselor ? (counselor.title || 'Admissions Counselor') : 'Admissions Counselor',
+        assignedAt: new Date(),
+      }
+      leadGroupId = counselor?.groupId || groupId || null
+    } else {
+      // Automatic capacity-aware round-robin assignment
+      const allocation = await allocateLead(formId)
+      leadAssignmentStatus = allocation.assignmentStatus || 'ASSIGNED'
+      leadAssignedTo = allocation.assignedTo || null
+      leadGroupId = allocation.groupId || null
+    }
+
+    const cleanProgram = courseProgram || 'Healthcare Management'
+    const cleanVariant = cleanProgram === 'Healthcare Management' ? (courseVariant || '') : ''
+
     const newLead = new Lead({
       metaLeadId: `manual_${Date.now()}`,
-      fullName: req.body.fullName || req.body.name || 'Untitled Lead',
-      phone: sanitizePhone(req.body.phone || ''),
-      email: (req.body.email || '').toLowerCase(),
-      qualification: req.body.qualification || 'Graduation / Degree',
-      preferredLocation: req.body.preferredLocation || 'Kerala',
-      learningMode: req.body.learningMode || 'Live Online',
-      interestReason: req.body.interestReason || '',
-      careerRole: req.body.careerRole || 'Hospital Administration',
-      platform: req.body.platform || 'Direct Form',
-      campaignName: req.body.campaignName || 'Manual Entry',
-      adsetName: 'Direct Inbound',
-      adName: 'Direct',
-      formName: 'Manual Web Entry',
+      fullName: nameVal,
+      phone: sanitizePhone(phone || ''),
+      email: (email || '').toLowerCase().trim(),
+      qualification: qualification || 'Degree',
+      age: age ? Number(age) : null,
+      state: state || 'Kerala',
+      otherState: state === 'Other' ? (otherState || '') : '',
+      district: state === 'Kerala' ? (district || 'Ernakulam') : 'Other',
+      courseProgram: cleanProgram,
+      courseVariant: cleanVariant,
+      customerCategory: customerCategory || 'Ongoing Student',
+
+      preferredLocation: state === 'Kerala' ? (district || 'Kerala') : (otherState || 'Outside Kerala'),
+      learningMode: 'Flexible',
+      careerRole: 'Hospital Administration',
+      platform: 'Manual Entry',
+      campaignName: 'Direct Admission / Manual Typing',
+      adsetName: 'Inbound Enquiry',
+      adName: 'Manual Entry',
+      formName: 'Manual Admission Form',
       createdTime: new Date(),
-      assignmentStatus: req.body.assignedTo ? 'ASSIGNED' : 'UNASSIGNED',
-      assignedTo: req.body.assignedTo || null,
-      status: req.body.status || 'Not Contacted',
-      subStatus: req.body.subStatus || 'New Lead In Pool',
+
+      assignmentStatus: leadAssignmentStatus,
+      assignedTo: leadAssignedTo,
+      groupId: leadGroupId,
+
+      status: status || 'Not Contacted',
+      subStatus: subStatus || (leadAssignmentStatus === 'ASSIGNED' ? 'Assigned to Counselor' : 'New Lead In Pool'),
       callAttempts: 0,
       callbackAt: null,
+      isDropped: false,
+      isCompleted: false,
+
       notes: [
         {
-          text: 'Lead created manually in system',
-          author: 'Admin',
-          status: 'Not Contacted',
-          subStatus: 'New Lead In Pool',
+          text: leadAssignedTo
+            ? `Lead manually added and assigned directly to ${leadAssignedTo.repName}`
+            : 'Lead manually added to system pool',
+          author: author || 'Admin',
+          status: status || 'Not Contacted',
+          subStatus: subStatus || (leadAssignmentStatus === 'ASSIGNED' ? 'Assigned to Counselor' : 'New Lead In Pool'),
           timestamp: new Date(),
         },
       ],
@@ -622,8 +743,136 @@ export const createLead = async (req, res) => {
     const saved = await newLead.save()
     res.status(201).json({
       success: true,
+      message: `Lead for ${saved.fullName} created successfully`,
       lead: { ...saved.toObject(), id: saved._id.toString() },
     })
+  } catch (error) {
+    res.status(500).json({ success: false, message: error.message })
+  }
+}
+
+// -------------------------------------------------------------
+// PUT /api/leads/:id/profile (Admin or Counselor Edit Profile)
+// -------------------------------------------------------------
+export const updateLeadProfile = async (req, res) => {
+  try {
+    const { id } = req.params
+    const lead = await Lead.findById(id)
+    if (!lead) {
+      return res.status(404).json({ success: false, message: 'Student / Lead not found' })
+    }
+
+    const {
+      fullName,
+      phone,
+      email,
+      qualification,
+      age,
+      state,
+      otherState,
+      district,
+      courseProgram,
+      courseVariant,
+      customerCategory,
+      status,
+      subStatus,
+      isDropped,
+      droppedReason,
+      isCompleted,
+      assignmentStatus,
+      assignedTo,
+      author,
+    } = req.body
+
+    if (fullName) lead.fullName = fullName.trim()
+    if (phone !== undefined) lead.phone = sanitizePhone(phone)
+    if (email !== undefined) lead.email = (email || '').toLowerCase().trim()
+    if (qualification) lead.qualification = qualification
+    if (age !== undefined) lead.age = age ? Number(age) : null
+    if (state) lead.state = state
+    if (otherState !== undefined) lead.otherState = otherState
+    if (district !== undefined) lead.district = district
+    if (courseProgram) {
+      lead.courseProgram = courseProgram
+      if (courseProgram !== 'Healthcare Management') {
+        lead.courseVariant = ''
+      } else if (courseVariant !== undefined) {
+        lead.courseVariant = courseVariant
+      }
+    } else if (courseVariant !== undefined && lead.courseProgram === 'Healthcare Management') {
+      lead.courseVariant = courseVariant
+    }
+    if (customerCategory) lead.customerCategory = customerCategory
+
+    if (status) lead.status = status
+    if (subStatus) lead.subStatus = subStatus
+
+    // Lifecycle completion / dropped
+    if (isCompleted !== undefined) {
+      lead.isCompleted = Boolean(isCompleted)
+      if (lead.isCompleted) {
+        lead.isDropped = false
+        lead.completedAt = lead.completedAt || new Date()
+        lead.subStatus = lead.subStatus || 'Student Enrolled'
+      }
+    }
+    if (isDropped !== undefined) {
+      lead.isDropped = Boolean(isDropped)
+      if (lead.isDropped) {
+        lead.isCompleted = false
+        lead.droppedReason = droppedReason || 'Lead Dropped / Lost'
+        lead.subStatus = lead.subStatus || 'Dropped'
+      }
+    }
+
+    // Assignment updates (e.g. moving back to system pool via manual data editing)
+    if (assignmentStatus === 'UNASSIGNED') {
+      lead.assignmentStatus = 'UNASSIGNED'
+      lead.assignedTo = null
+    } else if (assignedTo && (assignedTo.repId || assignedTo.id)) {
+      const repId = assignedTo.repId || assignedTo.id
+      const counselor = await User.findById(repId)
+      lead.assignmentStatus = 'ASSIGNED'
+      lead.assignedTo = {
+        repId: counselor ? counselor._id : repId,
+        repName: counselor ? counselor.name : assignedTo.repName,
+        repRole: counselor ? (counselor.title || 'Admissions Counselor') : 'Admissions Counselor',
+        assignedAt: new Date(),
+      }
+      lead.groupId = counselor?.groupId || lead.groupId
+    }
+
+    lead.notes.unshift({
+      text: `Student profile updated: ${lead.fullName} (${lead.courseProgram}${lead.courseVariant ? ' - ' + lead.courseVariant : ''})`,
+      author: author || 'Counselor',
+      status: lead.status,
+      subStatus: lead.subStatus,
+      timestamp: new Date(),
+    })
+
+    await lead.save()
+
+    res.status(200).json({
+      success: true,
+      message: 'Student profile updated successfully',
+      lead: { ...lead.toObject(), id: lead._id.toString() },
+    })
+  } catch (error) {
+    res.status(500).json({ success: false, message: error.message })
+  }
+}
+
+// -------------------------------------------------------------
+// DELETE /api/leads/:id
+// -------------------------------------------------------------
+export const deleteLead = async (req, res) => {
+  try {
+    const { id } = req.params
+    const deleted = await Lead.findByIdAndDelete(id)
+    if (!deleted) {
+      return res.status(404).json({ success: false, message: 'Lead not found' })
+    }
+    res.status(200).json({ success: true, message: 'Lead deleted successfully' })
   } catch (error) {
     res.status(500).json({ success: false, message: error.message })
   }

@@ -3,6 +3,7 @@ import MetaIntegration from '../models/MetaIntegration.js'
 import Lead from '../models/Lead.js'
 import { extractLeadFromRow, sanitizePhone } from '../utils/leadParser.js'
 import { sendTelegramLeadAlert, sendWebhookLeadAlert } from '../services/metaLeadService.js'
+import { allocateLead } from '../services/allocationService.js'
 
 export const WEBHOOK_VERIFY_TOKEN =
   process.env.META_WEBHOOK_VERIFY_TOKEN || 'futureace_leadgen_webhook_2026'
@@ -126,41 +127,53 @@ async function processLiveLead(leadgenId, formId, pageId) {
       return
     }
 
-    // 4. Create and Save New Lead in Pool
+    // 4. Capacity-Aware Round-Robin Lead Allocation
+    const allocation = await allocateLead(formId || raw.form_id)
+
     const newLead = new Lead({
       metaLeadId: String(raw.id),
       fullName: parsed.fullName || 'Unknown Candidate',
       phone: cleanPhone || parsed.phone,
       email: parsed.email,
-      qualification: parsed.qualification,
-      preferredLocation: parsed.preferredLocation,
-      learningMode: parsed.learningMode,
-      interestReason: parsed.interestReason,
-      careerRole: parsed.careerRole,
+      qualification: parsed.qualification || 'Degree',
+      age: parsed.age || null,
+      state: parsed.state || 'Kerala',
+      otherState: parsed.otherState || '',
+      district: parsed.district || parsed.preferredLocation || 'Ernakulam',
+      courseProgram: parsed.courseProgram || 'Healthcare Management',
+      courseVariant: parsed.courseVariant || '',
+      customerCategory: parsed.customerCategory || 'Ongoing Student',
+      preferredLocation: parsed.preferredLocation || 'Not Specified',
+      learningMode: parsed.learningMode || 'Flexible',
+      interestReason: parsed.interestReason || '',
+      careerRole: parsed.careerRole || 'Hospital Administration',
       platform: parsed.platform || 'Instagram',
       campaignName: parsed.campaignName || 'Meta Ads',
       adsetName: parsed.adsetName,
       adName: parsed.adName,
       formName,
       createdTime: parsed.createdTime ? new Date(parsed.createdTime) : new Date(),
-      assignmentStatus: 'UNASSIGNED',
-      assignedTo: null,
+      assignmentStatus: allocation.assignmentStatus,
+      assignedTo: allocation.assignedTo,
+      groupId: allocation.groupId,
       status: 'Not Contacted',
-      subStatus: 'New Lead In Pool',
+      subStatus: allocation.assignedTo ? 'Assigned to Counselor' : 'New Lead In Pool',
       callAttempts: 0,
       notes: [
         {
-          text: `⚡ Ingested instantly via Meta Lead Ads Webhook from form: "${formName}"`,
-          author: 'Meta Real-Time Webhook',
+          text: allocation.assignedTo
+            ? `⚡ Live Webhook Ingestion: Automatically assigned to Counselor ${allocation.assignedTo.repName} (Form: "${formName}")`
+            : `⚡ Live Webhook Ingestion: Added to system pool from form: "${formName}"`,
+          author: 'Meta Real-Time Allocation Engine',
           status: 'Not Contacted',
-          subStatus: 'New Lead In Pool',
+          subStatus: allocation.assignedTo ? 'Assigned to Counselor' : 'New Lead In Pool',
           timestamp: new Date(),
         },
       ],
     })
 
     const savedLead = await newLead.save()
-    console.log(`🎉 [Meta Webhook] Successfully added new lead to pool: ${savedLead.fullName} (${savedLead.phone})`)
+    console.log(`🎉 [Meta Webhook] Successfully ingested lead: ${savedLead.fullName} -> ${allocation.assignedTo?.repName || 'System Pool'}`)
 
     // 5. Send Alerts
     if (config) {

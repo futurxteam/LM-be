@@ -47,6 +47,31 @@ export const getAllUsers = async (req, res) => {
 
         const contactRate = totalAssigned > 0 ? Math.round((contactedCount / totalAssigned) * 100) : 0
 
+        const completedCount = await Lead.countDocuments({
+          $or: [
+            { 'assignedTo.repId': userId },
+            { 'assignedTo.repId': userId.toString() },
+          ],
+          isCompleted: true,
+        })
+
+        const droppedCount = await Lead.countDocuments({
+          $or: [
+            { 'assignedTo.repId': userId },
+            { 'assignedTo.repId': userId.toString() },
+          ],
+          isDropped: true,
+        })
+
+        const activeCount = await Lead.countDocuments({
+          $or: [
+            { 'assignedTo.repId': userId },
+            { 'assignedTo.repId': userId.toString() },
+          ],
+          isCompleted: { $ne: true },
+          isDropped: { $ne: true },
+        })
+
         return {
           id: u._id.toString(),
           _id: u._id.toString(),
@@ -57,7 +82,12 @@ export const getAllUsers = async (req, res) => {
           specialty: u.specialty || 'Healthcare Admissions',
           avatar: u.avatar || generateAvatar(u.name),
           active: u.active !== false,
+          groupId: u.groupId || null,
+          isGroupManager: Boolean(u.isGroupManager),
           totalAssigned,
+          activeCount,
+          completedCount,
+          droppedCount,
           contactedCount,
           enrolledCount,
           contactRate,
@@ -142,11 +172,19 @@ export const createUser = async (req, res) => {
 export const updateUser = async (req, res) => {
   try {
     const { id } = req.params
-    const { name, email, password, role, title, specialty, active } = req.body
+    const { name, email, password, role, title, specialty, active, groupId, isGroupManager } = req.body
 
     const user = await User.findById(id)
     if (!user) {
       return res.status(404).json({ success: false, message: 'User not found' })
+    }
+
+    if (groupId !== undefined) {
+      user.groupId = groupId || null
+    }
+
+    if (isGroupManager !== undefined) {
+      user.isGroupManager = Boolean(isGroupManager)
     }
 
     if (name && name.trim()) {

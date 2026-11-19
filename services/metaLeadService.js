@@ -2,6 +2,7 @@ import axios from 'axios'
 import MetaIntegration from '../models/MetaIntegration.js'
 import Lead from '../models/Lead.js'
 import { extractLeadFromRow, sanitizePhone } from '../utils/leadParser.js'
+import { allocateLead } from './allocationService.js'
 
 /**
  * Send alert message to Telegram Bot if enabled
@@ -205,13 +206,22 @@ export async function syncMetaLeads(manualToken, manualPageId, forceFullSync = f
           continue
         }
 
-        // Create new unassigned lead in the pool
+        // Capacity-Aware Round-Robin Lead Allocation
+        const allocation = await allocateLead(form.formId)
+
         const newLead = new Lead({
           metaLeadId: parsed.metaLeadId,
           fullName: parsed.fullName,
           phone: cleanPhone || parsed.phone,
           email: parsed.email,
-          qualification: parsed.qualification,
+          qualification: parsed.qualification || 'Degree',
+          age: parsed.age || null,
+          state: parsed.state || 'Kerala',
+          otherState: parsed.otherState || '',
+          district: parsed.district || parsed.preferredLocation || 'Ernakulam',
+          courseProgram: parsed.courseProgram || 'Healthcare Management',
+          courseVariant: parsed.courseVariant || '',
+          customerCategory: parsed.customerCategory || 'Ongoing Student',
           preferredLocation: parsed.preferredLocation,
           learningMode: parsed.learningMode,
           interestReason: parsed.interestReason,
@@ -222,18 +232,21 @@ export async function syncMetaLeads(manualToken, manualPageId, forceFullSync = f
           adName: parsed.adName,
           formName: form.formName,
           createdTime: parsed.createdTime ? new Date(parsed.createdTime) : new Date(),
-          assignmentStatus: 'UNASSIGNED',
-          assignedTo: null,
+          assignmentStatus: allocation.assignmentStatus,
+          assignedTo: allocation.assignedTo,
+          groupId: allocation.groupId,
           status: 'Not Contacted',
-          subStatus: 'New Lead In Pool',
+          subStatus: allocation.assignedTo ? 'Assigned to Counselor' : 'New Lead In Pool',
           callAttempts: 0,
           callbackAt: null,
           notes: [
             {
-              text: `Ingested live via Meta Graph API from form: "${form.formName}"`,
-              author: 'Meta Graph API Sync',
+              text: allocation.assignedTo
+                ? `Ingested via Meta Graph API: Automatically assigned to Counselor ${allocation.assignedTo.repName} (Form: "${form.formName}")`
+                : `Ingested live via Meta Graph API from form: "${form.formName}"`,
+              author: 'Meta Allocation Engine',
               status: 'Not Contacted',
-              subStatus: 'New Lead In Pool',
+              subStatus: allocation.assignedTo ? 'Assigned to Counselor' : 'New Lead In Pool',
               timestamp: new Date(),
             },
           ],

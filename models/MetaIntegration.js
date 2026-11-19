@@ -8,6 +8,9 @@ const selectedFormSchema = new mongoose.Schema(
     active: { type: Boolean, default: true },
     leadsCount: { type: Number, default: 0 },
     lastSyncAt: { type: Date },
+    assignedGroupId: { type: mongoose.Schema.Types.ObjectId, ref: 'CounselorGroup', default: null },
+    assignedCounselorIds: [{ type: mongoose.Schema.Types.ObjectId, ref: 'User' }],
+    roundRobinIndex: { type: Number, default: 0 },
   },
   { _id: false }
 )

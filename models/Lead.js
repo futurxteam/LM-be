@@ -17,7 +17,15 @@ const leadSchema = new mongoose.Schema(
     fullName: { type: String, required: true, trim: true },
     phone: { type: String, index: true, trim: true },
     email: { type: String, lowercase: true, trim: true },
-    qualification: { type: String, default: 'Graduation / Degree' },
+    qualification: { type: String, default: 'Degree' },
+    age: { type: Number, default: null },
+    state: { type: String, default: 'Kerala' },
+    otherState: { type: String, default: '' },
+    district: { type: String, default: 'Ernakulam' },
+    courseProgram: { type: String, default: 'Healthcare Management' },
+    courseVariant: { type: String, default: '' },
+    customerCategory: { type: String, default: 'Ongoing Student' },
+
     preferredLocation: { type: String, default: 'Not Specified' },
     learningMode: { type: String, default: 'Flexible' },
     interestReason: { type: String, default: '' },
@@ -43,6 +51,11 @@ const leadSchema = new mongoose.Schema(
       repRole: { type: String },
       assignedAt: { type: Date },
     },
+    groupId: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: 'CounselorGroup',
+      default: null,
+    },
 
     // Contact Status Workflow
     status: {
@@ -54,6 +67,12 @@ const leadSchema = new mongoose.Schema(
     subStatus: { type: String, default: 'New Lead In Pool' },
     callAttempts: { type: Number, default: 0 },
     callbackAt: { type: Date, default: null },
+
+    // Lifecycle Completion / Dropped Tracking
+    isDropped: { type: Boolean, default: false, index: true },
+    isCompleted: { type: Boolean, default: false, index: true },
+    droppedReason: { type: String, default: '' },
+    completedAt: { type: Date, default: null },
 
     notes: [noteSchema],
   },

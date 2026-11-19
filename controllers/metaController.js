@@ -220,6 +220,9 @@ export const saveSelectedForms = async (req, res) => {
       status: f.status || 'ACTIVE',
       active: Boolean(f.active),
       leadsCount: Number(f.leadsCount) || 0,
+      assignedGroupId: f.assignedGroupId || null,
+      assignedCounselorIds: Array.isArray(f.assignedCounselorIds) ? f.assignedCounselorIds : (f.assignedCounselorId ? [f.assignedCounselorId] : []),
+      roundRobinIndex: Number(f.roundRobinIndex) || 0,
     }))
 
     await config.save()

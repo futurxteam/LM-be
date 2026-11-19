@@ -9,6 +9,8 @@ import {
   autoAssignLeads,
   unassignLeads,
   updateLeadStatus,
+  updateLeadProfile,
+  deleteLead,
   createLead,
   resetLeadDatabase,
 } from '../controllers/leadController.js'
@@ -54,6 +56,9 @@ router.post('/unassign', unassignLeads)
 
 // Status & Follow-ups
 router.patch('/:id/status', updateLeadStatus)
+router.put('/:id/profile', updateLeadProfile)
+router.patch('/:id/profile', updateLeadProfile)
+router.delete('/:id', deleteLead)
 
 // Temporary Reset / Clean Lead Database Tool
 router.post('/reset-db', resetLeadDatabase)

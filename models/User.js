@@ -6,10 +6,12 @@ const userSchema = new mongoose.Schema(
     email: { type: String, required: true, unique: true, lowercase: true, trim: true },
     password: { type: String, default: 'password123' },
     role: { type: String, enum: ['admin', 'sales'], default: 'sales', index: true },
-    title: { type: String, default: 'Sales Representative' },
+    title: { type: String, default: 'Admissions Counselor' },
     specialty: { type: String, default: 'Healthcare Admissions' },
-    avatar: { type: String, default: 'SR' },
+    avatar: { type: String, default: 'AC' },
     active: { type: Boolean, default: true },
+    groupId: { type: mongoose.Schema.Types.ObjectId, ref: 'CounselorGroup', default: null },
+    isGroupManager: { type: Boolean, default: false },
   },
   { timestamps: true }
 )

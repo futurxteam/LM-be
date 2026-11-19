@@ -15,6 +15,7 @@ import leadRoutes from './routes/leadRoutes.js'
 import statsRoutes from './routes/statsRoutes.js'
 import metaRoutes from './routes/metaRoutes.js'
 import userRoutes from './routes/userRoutes.js'
+import groupRoutes from './routes/groupRoutes.js'
 import { startMetaCron } from './services/metaCron.js'
 
 const app = express()
@@ -37,6 +38,7 @@ app.use('/api/leads', leadRoutes)
 app.use('/api/stats', statsRoutes)
 app.use('/api/meta', metaRoutes)
 app.use('/api/users', userRoutes)
+app.use('/api/groups', groupRoutes)
 
 // Health Check
 app.get('/', (req, res) => {
