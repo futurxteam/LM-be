@@ -16,6 +16,16 @@ export async function allocateLead(formId) {
     const config = await MetaIntegration.findOne()
     const form = config?.selectedForms?.find(f => f.formId === String(formId))
 
+    // Form MUST be explicitly enabled (active: true) in CRM to auto-assign leads!
+    if (!form || !form.active) {
+      console.log(`ℹ️ [Allocation Engine] Form "${form?.formName || formId}" is NOT enabled (active: false). Auto-assignment skipped -> Lead placed as UNASSIGNED in Pool.`)
+      return {
+        assignmentStatus: 'UNASSIGNED',
+        assignedTo: null,
+        groupId: null,
+      }
+    }
+
     let candidates = []
     let assignedGroupId = form?.assignedGroupId || null
 
