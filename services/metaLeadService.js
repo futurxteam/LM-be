@@ -141,26 +141,30 @@ export async function syncMetaLeads(manualToken, manualPageId, forceFullSync = f
   let totalDuplicatesCount = 0
   const newlyIngestedLeads = []
 
-  // Incremental sync filter: only fetch leads created after last successful sync (with 60s safety buffer)
-  // If forceFullSync is requested or if lastSuccessfulSyncAt is null, fetch all historical submissions
-  const lastSync = forceFullSync ? null : config?.lastSuccessfulSyncAt
-  const filtering = lastSync
-    ? JSON.stringify([
-        {
-          field: 'time_created',
-          operator: 'GREATER_THAN',
-          value: Math.floor((lastSync.getTime() - 60000) / 1000),
-        },
-      ])
-    : undefined
+  // Incremental sync filter: only fetch leads created after last successful sync or form activation
+  const globalSyncTime = config?.lastSuccessfulSyncAt || new Date()
 
   // 2. Fetch leads from each active form
   for (const form of activeForms) {
     try {
+      // Baseline time: NEVER fetch submissions created prior to the form being enabled/activated
+      const formActivatedAt = form.activatedAt ? new Date(form.activatedAt) : globalSyncTime
+      const cutoffTime = (!forceFullSync && config?.lastSuccessfulSyncAt && config.lastSuccessfulSyncAt > formActivatedAt)
+        ? config.lastSuccessfulSyncAt
+        : formActivatedAt
+
+      const filtering = JSON.stringify([
+        {
+          field: 'time_created',
+          operator: 'GREATER_THAN',
+          value: Math.floor((cutoffTime.getTime() - 60000) / 1000),
+        },
+      ])
+
       const leadsParams = {
         fields: 'id,created_time,form_id,ad_id,ad_name,adset_name,campaign_name,platform,is_organic,field_data',
         limit: 100,
-        ...(filtering ? { filtering } : {}),
+        filtering,
       }
 
       const rawLeads = await fetchAllPages(`${GRAPH_URL}/${form.formId}/leads`, leadsParams, token)
@@ -206,9 +210,8 @@ export async function syncMetaLeads(manualToken, manualPageId, forceFullSync = f
           continue
         }
 
-        // Capacity-Aware Round-Robin Lead Allocation
-        const allocation = await allocateLead(form.formId)
-
+        // NOTE: Auto round-robin is strictly reserved for live Webhook events (metaWebhookController).
+        // Manual/polled sync puts leads as UNASSIGNED in the pool for admin review.
         const newLead = new Lead({
           metaLeadId: parsed.metaLeadId,
           fullName: parsed.fullName,
@@ -232,21 +235,19 @@ export async function syncMetaLeads(manualToken, manualPageId, forceFullSync = f
           adName: parsed.adName,
           formName: form.formName,
           createdTime: parsed.createdTime ? new Date(parsed.createdTime) : new Date(),
-          assignmentStatus: allocation.assignmentStatus,
-          assignedTo: allocation.assignedTo,
-          groupId: allocation.groupId,
+          assignmentStatus: 'UNASSIGNED',
+          assignedTo: null,
+          groupId: null,
           status: 'Not Contacted',
-          subStatus: allocation.assignedTo ? 'Assigned to Counselor' : 'New Lead In Pool',
+          subStatus: 'New Lead In Pool',
           callAttempts: 0,
           callbackAt: null,
           notes: [
             {
-              text: allocation.assignedTo
-                ? `Ingested via Meta Graph API: Automatically assigned to Counselor ${allocation.assignedTo.repName} (Form: "${form.formName}")`
-                : `Ingested live via Meta Graph API from form: "${form.formName}"`,
-              author: 'Meta Allocation Engine',
+              text: `Ingested via Meta Graph API from form: "${form.formName}"`,
+              author: 'Meta Lead Ingestion',
               status: 'Not Contacted',
-              subStatus: allocation.assignedTo ? 'Assigned to Counselor' : 'New Lead In Pool',
+              subStatus: 'New Lead In Pool',
               timestamp: new Date(),
             },
           ],

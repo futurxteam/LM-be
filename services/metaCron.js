@@ -8,7 +8,7 @@ let cronTask = null
  * Start or reload the scheduled Meta sync task
  */
 // -------------------------------------------------------------
-// Scheduled Meta Lead Auto-Ingestion (Runs every 1 minute)
+// Scheduled Meta Lead Poller (Disabled by default: live webhooks handle real-time ingestion)
 // -------------------------------------------------------------
 export function startMetaCron() {
   if (cronTask) {
@@ -16,8 +16,8 @@ export function startMetaCron() {
     cronTask = null
   }
 
-  // Runs every 1 minute to ensure leads enter the pool with zero manual effort
-  cronTask = cron.schedule('* * * * *', async () => {
+  // Only polls if explicitly enabled by admin in Meta Settings (autoSync === true)
+  cronTask = cron.schedule('*/15 * * * *', async () => {
     try {
       const config = await MetaIntegration.findOne()
       if (!config || !config.autoSync || !config.accessToken || !config.pageId) {
@@ -26,13 +26,13 @@ export function startMetaCron() {
 
       const result = await syncMetaLeads()
       if (result.addedCount > 0) {
-        console.log(`⚡ [Auto-Ingestion] Automatically placed +${result.addedCount} new Meta leads directly into the pool!`)
+        console.log(`ℹ️ [Meta Poller] Added +${result.addedCount} new leads to unassigned pool.`)
       }
     } catch (err) {
-      console.error('Auto-sync error:', err.response?.data?.error?.message || err.message)
+      console.error('Meta poller error:', err.response?.data?.error?.message || err.message)
     }
   })
 
-  console.log('🚀 Automated Meta lead ingestion active: Checking active forms every 60 seconds.')
+  console.log('⚡ Meta Lead Webhook receiver active. Polling cron set to standby (every 15m, disabled by default).')
 }
 

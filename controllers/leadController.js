@@ -885,17 +885,19 @@ export const resetLeadDatabase = async (req, res) => {
   try {
     const { mode } = req.body // 'clean' to wipe all leads, or 'reseed' to restore default 34 leads
 
+    const now = new Date()
+
     if (mode === 'clean') {
       const deleteResult = await Lead.deleteMany({})
       await MetaIntegration.updateMany({}, {
         $set: {
-          lastSuccessfulSyncAt: null,
-          lastSyncMessage: 'Database cleaned: All leads wiped. Next Meta sync will fetch all submissions.',
+          lastSuccessfulSyncAt: now,
+          lastSyncMessage: 'Database cleaned: All leads wiped. Historical sync disabled to prevent resurrecting old submissions.',
         },
       })
       return res.status(200).json({
         success: true,
-        message: `Database cleaned: Deleted ${deleteResult.deletedCount} leads. The database is now empty, and Meta sync cutoff has been reset.`,
+        message: `Database cleaned: Deleted ${deleteResult.deletedCount} leads. The database is now empty.`,
         deletedCount: deleteResult.deletedCount,
         leadsCount: 0,
       })
@@ -905,14 +907,14 @@ export const resetLeadDatabase = async (req, res) => {
     await seedDatabase(true)
     await MetaIntegration.updateMany({}, {
       $set: {
-        lastSuccessfulSyncAt: null,
-        lastSyncMessage: 'Database reseeded: Restored baseline leads. Next Meta sync will check all submissions.',
+        lastSuccessfulSyncAt: now,
+        lastSyncMessage: 'Database reseeded: Restored baseline leads.',
       },
     })
     const count = await Lead.countDocuments()
     return res.status(200).json({
       success: true,
-      message: `Database reset & reseeded successfully! Restored ${count} initial Meta leads, and Meta sync cutoff has been reset.`,
+      message: `Database reset & reseeded successfully! Restored ${count} initial leads.`,
       leadsCount: count,
     })
   } catch (error) {

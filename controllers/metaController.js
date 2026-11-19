@@ -214,16 +214,38 @@ export const saveSelectedForms = async (req, res) => {
       config = new MetaIntegration()
     }
 
-    config.selectedForms = forms.map(f => ({
-      formId: String(f.formId),
-      formName: f.formName || 'Lead Form',
-      status: f.status || 'ACTIVE',
-      active: Boolean(f.active),
-      leadsCount: Number(f.leadsCount) || 0,
-      assignedGroupId: f.assignedGroupId || null,
-      assignedCounselorIds: Array.isArray(f.assignedCounselorIds) ? f.assignedCounselorIds : (f.assignedCounselorId ? [f.assignedCounselorId] : []),
-      roundRobinIndex: Number(f.roundRobinIndex) || 0,
-    }))
+    const existingFormsMap = new Map((config.selectedForms || []).map(f => [String(f.formId), f]))
+    const now = new Date()
+
+    config.selectedForms = forms.map(f => {
+      const fid = String(f.formId)
+      const existing = existingFormsMap.get(fid)
+      const isNowActive = Boolean(f.active)
+      const wasActive = existing ? existing.active : false
+
+      let activatedAt = existing?.activatedAt
+      if (isNowActive && !wasActive) {
+        // Newly enabled form: baseline is NOW so past submissions are never imported
+        activatedAt = now
+      } else if (!activatedAt && isNowActive) {
+        activatedAt = now
+      }
+
+      return {
+        formId: fid,
+        formName: f.formName || 'Lead Form',
+        status: f.status || 'ACTIVE',
+        active: isNowActive,
+        leadsCount: Number(f.leadsCount) || 0,
+        activatedAt: activatedAt || now,
+        assignedGroupId: f.assignedGroupId || null,
+        assignedCounselorIds: Array.isArray(f.assignedCounselorIds) ? f.assignedCounselorIds : (f.assignedCounselorId ? [f.assignedCounselorId] : []),
+        roundRobinIndex: Number(f.roundRobinIndex) || 0,
+      }
+    })
+
+    // Advance lastSuccessfulSyncAt to now so historical leads from enabled forms are not fetched
+    config.lastSuccessfulSyncAt = now
 
     await config.save()
     const activeCount = config.selectedForms.filter(f => f.active).length
