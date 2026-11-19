@@ -34,3 +34,4 @@ const counselorGroupSchema = new mongoose.Schema(
 
 const CounselorGroup = mongoose.model('CounselorGroup', counselorGroupSchema)
 export default CounselorGroup
+
