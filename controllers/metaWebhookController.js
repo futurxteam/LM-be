@@ -36,23 +36,42 @@ export const handleMetaWebhookEvent = async (req, res) => {
 
   try {
     const { object, entry } = req.body || {}
-    if (object !== 'page') return
 
-    console.log(`📡 [Meta Webhook] Event received with ${entry?.length || 0} entry items.`)
+    console.log('\n' + '='.repeat(68))
+    console.log(`🔔 [META WEBHOOK RECEIVED] ${new Date().toLocaleString()}`)
+    console.log(`   Object: ${object || 'unknown'} | Entries: ${entry?.length || 0}`)
+    console.log('='.repeat(68))
 
-    for (const item of entry || []) {
+    if (object !== 'page') {
+      console.warn(`⚠️ [Meta Webhook Ignored] Received non-page event object: "${object}" (expected "page").`)
+      return
+    }
+
+    if (!Array.isArray(entry) || entry.length === 0) {
+      console.warn('⚠️ [Meta Webhook Ignored] Empty entries array in payload.')
+      return
+    }
+
+    for (const item of entry) {
+      const pageId = item.id
       for (const change of item.changes || []) {
+        console.log(`   Field: "${change.field}" | Page ID: ${pageId || change.value?.page_id}`)
+
         if (change.field === 'leadgen') {
-          const { leadgen_id, form_id, page_id } = change.value || {}
+          const { leadgen_id, form_id, page_id: eventPageId } = change.value || {}
           if (leadgen_id) {
-            console.log(`⚡ [Meta Webhook] Incoming new lead: leadgen_id=${leadgen_id}, form_id=${form_id}`)
-            await processLiveLead(leadgen_id, form_id, page_id)
+            console.log(`⚡ [Meta Webhook] New Lead Detected: Leadgen ID = ${leadgen_id}, Form ID = ${form_id}`)
+            await processLiveLead(leadgen_id, form_id, eventPageId || pageId)
+          } else {
+            console.warn('⚠️ [Meta Webhook Error] "leadgen" change event received without leadgen_id:', change.value)
           }
+        } else {
+          console.log(`ℹ️ [Meta Webhook] Skipping non-leadgen field event: "${change.field}"`)
         }
       }
     }
   } catch (err) {
-    console.error('❌ [Meta Webhook] Error processing event:', err.message)
+    console.error('❌ [Meta Webhook Fatal Error] Uncaught error handling event:', err.message, err.stack)
   }
 }
 
@@ -66,21 +85,37 @@ async function processLiveLead(leadgenId, formId, pageId) {
     const graphVersion = config?.graphVersion || process.env.META_GRAPH_VERSION || 'v21.0'
 
     if (!token) {
-      console.error('❌ [Meta Webhook] Cannot fetch lead: No Page Access Token configured')
+      console.error('❌ [Meta Webhook Error: Token Missing] Cannot fetch lead: No Page Access Token configured in database or environment.')
       return
     }
 
     // 1. Fetch full candidate lead data from Meta Graph API
-    const response = await axios.get(`https://graph.facebook.com/${graphVersion}/${leadgenId}`, {
-      params: {
-        access_token: token,
-        fields: 'id,created_time,form_id,ad_id,ad_name,adset_name,campaign_name,platform,field_data',
-      },
-      timeout: 10000,
-    })
+    console.log(`📡 [Meta Webhook] Querying Meta Graph API for leadgen_id: ${leadgenId}...`)
+    let response
+    try {
+      response = await axios.get(`https://graph.facebook.com/${graphVersion}/${leadgenId}`, {
+        params: {
+          access_token: token,
+          fields: 'id,created_time,form_id,ad_id,ad_name,adset_name,campaign_name,platform,field_data',
+        },
+        timeout: 10000,
+      })
+    } catch (apiErr) {
+      const errData = apiErr.response?.data?.error
+      console.error('❌ [Meta Webhook Error: Graph API Failed]')
+      console.error(`   HTTP Status: ${apiErr.response?.status || 'N/A'}`)
+      console.error(`   Message:     ${errData?.message || apiErr.message}`)
+      console.error(`   Code:        ${errData?.code || 'N/A'}`)
+      console.error(`   Type:        ${errData?.type || 'N/A'}`)
+      console.error(`   FBTrace ID:  ${errData?.fbtrace_id || 'N/A'}`)
+      return
+    }
 
     const raw = response.data
-    if (!raw) return
+    if (!raw) {
+      console.error(`❌ [Meta Webhook Error] Empty response body from Meta Graph API for lead ${leadgenId}`)
+      return
+    }
 
     const formConfig = config?.selectedForms?.find(f => f.formId === String(formId || raw.form_id))
     const formName = formConfig?.formName || 'Meta Lead Form'
@@ -108,7 +143,7 @@ async function processLiveLead(leadgenId, formId, pageId) {
 
     const parsed = extractLeadFromRow(rowData)
     if (!parsed) {
-      console.warn('⚠️ [Meta Webhook] Failed to parse lead fields:', rowData)
+      console.warn('❌ [Meta Webhook Error: Parsing Failed] Could not extract lead fields from rowData:', JSON.stringify(rowData, null, 2))
       return
     }
 
@@ -123,11 +158,12 @@ async function processLiveLead(leadgenId, formId, pageId) {
     })
 
     if (existing) {
-      console.log(`ℹ️ [Meta Webhook] Duplicate lead skipped: ${parsed.fullName} (${cleanPhone || raw.id})`)
+      console.warn(`⚠️ [Meta Webhook Skipped: Duplicate] Candidate "${parsed.fullName}" (Phone: ${cleanPhone || raw.id}) already exists in CRM (Lead ID: ${existing._id}).`)
       return
     }
 
     // 4. Capacity-Aware Round-Robin Lead Allocation
+    console.log(`⚖️ [Meta Webhook] Running lead assignment engine for form: "${formName}" (ID: ${formId || raw.form_id})...`)
     const allocation = await allocateLead(formId || raw.form_id)
 
     const newLead = new Lead({
@@ -172,13 +208,44 @@ async function processLiveLead(leadgenId, formId, pageId) {
       ],
     })
 
-    const savedLead = await newLead.save()
-    console.log(`🎉 [Meta Webhook] Successfully ingested lead: ${savedLead.fullName} -> ${allocation.assignedTo?.repName || 'System Pool'}`)
+    let savedLead
+    try {
+      savedLead = await newLead.save()
+    } catch (saveErr) {
+      console.error('❌ [Meta Webhook Error: Database Save Failed]', saveErr.message, saveErr)
+      return
+    }
+
+    console.log('\n' + '='.repeat(68))
+    if (allocation.assignedTo) {
+      console.log('🎯 [LEAD ASSIGNMENT SUCCESSFUL - LIVE WEBHOOK]')
+      console.log(`   Candidate:   ${savedLead.fullName}`)
+      console.log(`   Phone:       ${savedLead.phone}`)
+      console.log(`   Email:       ${savedLead.email || 'N/A'}`)
+      console.log(`   Form:        ${formName} (${formId || raw.form_id})`)
+      console.log(`   Assigned To: ${allocation.assignedTo.repName} [${allocation.assignedTo.repRole}]`)
+      console.log(`   Status:      ${savedLead.status} • ${savedLead.subStatus}`)
+    } else {
+      console.log('📥 [LEAD INGESTION - PLACED IN SYSTEM POOL]')
+      console.log(`   Candidate:   ${savedLead.fullName}`)
+      console.log(`   Phone:       ${savedLead.phone}`)
+      console.log(`   Form:        ${formName} (${formId || raw.form_id})`)
+      console.log(`   Status:      UNASSIGNED (In Pool - No counselor assigned)`)
+    }
+    console.log('='.repeat(68) + '\n')
 
     // 5. Send Alerts
     if (config) {
-      await sendTelegramLeadAlert(config, savedLead)
-      await sendWebhookLeadAlert(config, savedLead)
+      try {
+        await sendTelegramLeadAlert(config, savedLead)
+      } catch (tgErr) {
+        console.warn('⚠️ [Meta Webhook Warning: Telegram Alert Failed]:', tgErr.message)
+      }
+      try {
+        await sendWebhookLeadAlert(config, savedLead)
+      } catch (whErr) {
+        console.warn('⚠️ [Meta Webhook Warning: Outbound Webhook Alert Failed]:', whErr.message)
+      }
 
       // Update form's leadsCount and timestamp
       if (formConfig) {
@@ -192,7 +259,7 @@ async function processLiveLead(leadgenId, formId, pageId) {
       await config.save()
     }
   } catch (err) {
-    console.error(`❌ [Meta Webhook] Error fetching lead ${leadgenId}:`, err.response?.data || err.message)
+    console.error(`❌ [Meta Webhook Error: Processing Failed for lead ${leadgenId}]:`, err.message, err.stack)
   }
 }
 

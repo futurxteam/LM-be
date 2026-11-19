@@ -47,6 +47,7 @@ export async function allocateLead(formId) {
 
     // If still no counselors exist in the system, keep in system pool
     if (candidates.length === 0) {
+      console.warn('⚠️ [Allocation Engine] No active sales counselors found in database. Lead will be placed as UNASSIGNED in Pool.')
       return {
         assignmentStatus: 'UNASSIGNED',
         assignedTo: null,
@@ -57,6 +58,7 @@ export async function allocateLead(formId) {
     // 4. Single Counselor assigned -> 100% of leads to this counselor
     if (candidates.length === 1) {
       const single = candidates[0]
+      console.log(`⚖️ [Allocation Engine] Direct Assignment (100%): Routed to Counselor "${single.name}" [${single.title || 'Admissions Counselor'}]`)
       return {
         assignmentStatus: 'ASSIGNED',
         assignedTo: {
@@ -109,6 +111,7 @@ export async function allocateLead(formId) {
     })
 
     const chosen = counselorStats[0].counselor
+    console.log(`⚖️ [Allocation Engine] Capacity Round-Robin (${candidates.length} counselors): Selected "${chosen.name}" (Active Backlog: ${counselorStats[0].activeCount})`)
 
     // Advance round-robin pointer on the form
     if (form && config) {
