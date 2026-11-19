@@ -4,6 +4,30 @@ import Lead from '../models/Lead.js'
 import { extractLeadFromRow, sanitizePhone } from '../utils/leadParser.js'
 import { syncMetaLeads } from '../services/metaLeadService.js'
 
+/**
+ * Automatically subscribes a Facebook Page to the Meta App for real-time leadgen webhooks
+ */
+export async function ensurePageSubscribed(pageId, token, graphVersion = 'v21.0') {
+  if (!pageId || !token) return false
+  try {
+    const res = await axios.post(
+      `https://graph.facebook.com/${graphVersion}/${pageId}/subscribed_apps`,
+      null,
+      {
+        params: {
+          access_token: token,
+          subscribed_fields: 'leadgen',
+        },
+      }
+    )
+    console.log(`✅ [Meta Webhook] Subscribed Page ${pageId} to real-time leadgen events.`)
+    return res.data?.success === true
+  } catch (err) {
+    console.warn('⚠️ [Meta Webhook Subscription] Note:', err.response?.data?.error?.message || err.message)
+    return false
+  }
+}
+
 function maskToken(token) {
   if (!token || token.length < 12) return ''
   return `${token.substring(0, 8)}...${token.substring(token.length - 4)}`
@@ -73,6 +97,9 @@ export const saveMetaConfig = async (req, res) => {
     }
 
     await config.save()
+
+    // Ensure Facebook Page is subscribed for real-time leadgen webhooks
+    ensurePageSubscribed(config.pageId, config.accessToken, config.graphVersion).catch(() => {})
 
     res.status(200).json({
       success: true,
@@ -249,6 +276,9 @@ export const saveSelectedForms = async (req, res) => {
 
     await config.save()
     const activeCount = config.selectedForms.filter(f => f.active).length
+
+    // Ensure Facebook Page is subscribed for real-time leadgen webhooks
+    ensurePageSubscribed(config.pageId, config.accessToken, config.graphVersion).catch(() => {})
 
     res.status(200).json({
       success: true,
