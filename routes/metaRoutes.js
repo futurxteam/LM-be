@@ -10,6 +10,11 @@ import {
   previewFormLeads,
   importSelectedLeads,
 } from '../controllers/metaController.js'
+import {
+  verifyMetaWebhook,
+  handleMetaWebhookEvent,
+  subscribePageToWebhook,
+} from '../controllers/metaWebhookController.js'
 
 const router = express.Router()
 
@@ -23,6 +28,11 @@ router.post('/test-telegram', testTelegramAlert)
 router.post('/test-webhook', testWebhookAlert)
 router.post('/preview-form-leads', previewFormLeads)
 router.post('/import-selected-leads', importSelectedLeads)
+
+// Real-Time Meta Lead Ads Webhook
+router.get('/webhook', verifyMetaWebhook)
+router.post('/webhook', handleMetaWebhookEvent)
+router.post('/subscribe-page-webhook', subscribePageToWebhook)
 
 export default router
 
