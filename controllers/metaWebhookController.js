@@ -89,6 +89,16 @@ async function processLiveLead(leadgenId, formId, pageId) {
       return
     }
 
+    // Special handling for Meta Developer Dashboard Test Button (sends dummy placeholder 444444444444)
+    if (String(leadgenId) === '444444444444' || String(leadgenId).startsWith('444444')) {
+      console.log('\n' + '='.repeat(68))
+      console.log('✅ [META DASHBOARD TEST PING VERIFIED SUCCESSFULLY]')
+      console.log('   Meta successfully connected to your server and delivered the webhook payload!')
+      console.log('   (Note: "444444444444" is Meta\'s generic test placeholder. Real leads will fetch and allocate live candidates).')
+      console.log('='.repeat(68) + '\n')
+      return
+    }
+
     // 1. Fetch full candidate lead data from Meta Graph API
     console.log(`📡 [Meta Webhook] Querying Meta Graph API for leadgen_id: ${leadgenId}...`)
     let response
