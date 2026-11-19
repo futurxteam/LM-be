@@ -7,28 +7,32 @@ let cronTask = null
 /**
  * Start or reload the scheduled Meta sync task
  */
+// -------------------------------------------------------------
+// Scheduled Meta Lead Auto-Ingestion (Runs every 1 minute)
+// -------------------------------------------------------------
 export function startMetaCron() {
   if (cronTask) {
     cronTask.stop()
     cronTask = null
   }
 
-  // Runs every 15 minutes by default
-  cronTask = cron.schedule('*/15 * * * *', async () => {
+  // Runs every 1 minute to ensure leads enter the pool with zero manual effort
+  cronTask = cron.schedule('* * * * *', async () => {
     try {
       const config = await MetaIntegration.findOne()
       if (!config || !config.autoSync || !config.accessToken || !config.pageId) {
         return
       }
 
-      console.log('⏰ Running scheduled background Meta lead synchronization...')
       const result = await syncMetaLeads()
-      console.log(`✅ Background Meta sync finished: +${result.addedCount} new leads.`)
+      if (result.addedCount > 0) {
+        console.log(`⚡ [Auto-Ingestion] Automatically placed +${result.addedCount} new Meta leads directly into the pool!`)
+      }
     } catch (err) {
-      console.error('Scheduled Meta sync error:', err.response?.data?.error?.message || err.message)
+      console.error('Auto-sync error:', err.response?.data?.error?.message || err.message)
     }
   })
 
-  console.log('🚀 Meta lead sync scheduled (runs every 15 minutes).')
+  console.log('🚀 Automated Meta lead ingestion active: Checking active forms every 60 seconds.')
 }
 
