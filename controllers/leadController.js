@@ -1,6 +1,7 @@
 import mongoose from 'mongoose'
 import Lead from '../models/Lead.js'
 import User from '../models/User.js'
+import MetaIntegration from '../models/MetaIntegration.js'
 import { parseLeadsData, sanitizePhone } from '../utils/leadParser.js'
 import { seedDatabase } from '../scripts/seedDB.js'
 
@@ -637,9 +638,15 @@ export const resetLeadDatabase = async (req, res) => {
 
     if (mode === 'clean') {
       const deleteResult = await Lead.deleteMany({})
+      await MetaIntegration.updateMany({}, {
+        $set: {
+          lastSuccessfulSyncAt: null,
+          lastSyncMessage: 'Database cleaned: All leads wiped. Next Meta sync will fetch all submissions.',
+        },
+      })
       return res.status(200).json({
         success: true,
-        message: `Database cleaned: Deleted ${deleteResult.deletedCount} leads. The database is now empty.`,
+        message: `Database cleaned: Deleted ${deleteResult.deletedCount} leads. The database is now empty, and Meta sync cutoff has been reset.`,
         deletedCount: deleteResult.deletedCount,
         leadsCount: 0,
       })
@@ -647,10 +654,16 @@ export const resetLeadDatabase = async (req, res) => {
 
     // Default 'reseed' mode
     await seedDatabase(true)
+    await MetaIntegration.updateMany({}, {
+      $set: {
+        lastSuccessfulSyncAt: null,
+        lastSyncMessage: 'Database reseeded: Restored baseline leads. Next Meta sync will check all submissions.',
+      },
+    })
     const count = await Lead.countDocuments()
     return res.status(200).json({
       success: true,
-      message: `Database reset & reseeded successfully! Restored ${count} initial Meta leads.`,
+      message: `Database reset & reseeded successfully! Restored ${count} initial Meta leads, and Meta sync cutoff has been reset.`,
       leadsCount: count,
     })
   } catch (error) {

@@ -95,7 +95,7 @@ async function fetchAllPages(url, params = {}, token) {
 /**
  * Main Synchronization Function: Fetches from active Meta forms and upserts into Lead model
  */
-export async function syncMetaLeads(manualToken, manualPageId) {
+export async function syncMetaLeads(manualToken, manualPageId, forceFullSync = false) {
   const config = await MetaIntegration.findOne()
 
   const token = manualToken || config?.accessToken || process.env.META_PAGE_ACCESS_TOKEN
@@ -141,7 +141,8 @@ export async function syncMetaLeads(manualToken, manualPageId) {
   const newlyIngestedLeads = []
 
   // Incremental sync filter: only fetch leads created after last successful sync (with 60s safety buffer)
-  const lastSync = config?.lastSuccessfulSyncAt
+  // If forceFullSync is requested or if lastSuccessfulSyncAt is null, fetch all historical submissions
+  const lastSync = forceFullSync ? null : config?.lastSuccessfulSyncAt
   const filtering = lastSync
     ? JSON.stringify([
         {

@@ -240,18 +240,24 @@ export const saveSelectedForms = async (req, res) => {
 // -------------------------------------------------------------
 export const syncLeads = async (req, res) => {
   try {
-    const { accessToken, pageId } = req.body || {}
-    const result = await syncMetaLeads(accessToken, pageId)
+    const { accessToken, pageId, forceFullSync } = req.body || {}
+    const result = await syncMetaLeads(accessToken, pageId, Boolean(forceFullSync))
 
     res.status(200).json({
       ...result,
       message: result.message || 'Meta leads synchronized successfully',
     })
   } catch (err) {
+    const isTokenExpired =
+      err.response?.data?.error?.code === 190 ||
+      err.response?.data?.error?.type === 'OAuthException' ||
+      /expired|token/i.test(err.response?.data?.error?.message || err.message)
+
     const errorMsg = err.response?.data?.error?.message || err.message
     console.error('Meta sync error:', err.response?.data || err.message)
     res.status(500).json({
       success: false,
+      isTokenExpired,
       message: `Failed to synchronize Meta leads: ${errorMsg}`,
     })
   }
@@ -397,6 +403,17 @@ export const previewFormLeads = async (req, res) => {
         ],
       })
 
+      let systemState = 'NOT_IN_SYSTEM' // 'IN_POOL' | 'ASSIGNED' | 'NOT_IN_SYSTEM'
+      let assignedAdvisor = null
+      if (existing) {
+        if (existing.assignmentStatus === 'ASSIGNED' && existing.assignedTo?.repName) {
+          systemState = 'ASSIGNED'
+          assignedAdvisor = existing.assignedTo.repName
+        } else {
+          systemState = 'IN_POOL'
+        }
+      }
+
       parsedLeads.push({
         metaLeadId: parsed.metaLeadId,
         fullName: parsed.fullName || 'Unknown Candidate',
@@ -410,9 +427,11 @@ export const previewFormLeads = async (req, res) => {
         campaignName: parsed.campaignName || 'Meta Ads',
         createdTime: parsed.createdTime,
         isExistingInDb: !!existing,
+        systemState,
+        assignedAdvisor,
         existingLeadId: existing?._id,
         existingStatus: existing?.status,
-        existingAssignment: existing?.assignedTo ? existing.assignedTo.repName : null,
+        existingAssignment: assignedAdvisor,
       })
     }
 
@@ -421,13 +440,25 @@ export const previewFormLeads = async (req, res) => {
       formId,
       formName,
       totalFetched: parsedLeads.length,
-      newCount: parsedLeads.filter(l => !l.isExistingInDb).length,
+      newCount: parsedLeads.filter(l => l.systemState === 'NOT_IN_SYSTEM').length,
+      inPoolCount: parsedLeads.filter(l => l.systemState === 'IN_POOL').length,
+      assignedCount: parsedLeads.filter(l => l.systemState === 'ASSIGNED').length,
       existingCount: parsedLeads.filter(l => l.isExistingInDb).length,
       leads: parsedLeads,
     })
   } catch (err) {
+    const isTokenExpired =
+      err.response?.data?.error?.code === 190 ||
+      err.response?.data?.error?.type === 'OAuthException' ||
+      /expired|token/i.test(err.response?.data?.error?.message || err.message)
+
     const errorMsg = err.response?.data?.error?.message || err.message
-    res.status(500).json({ success: false, message: `Failed to preview leads: ${errorMsg}` })
+    res.status(500).json({
+      success: false,
+      isTokenExpired,
+      message: `Failed to preview leads: ${errorMsg}`,
+      details: err.response?.data?.error,
+    })
   }
 }
 
