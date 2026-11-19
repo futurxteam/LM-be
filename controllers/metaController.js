@@ -435,6 +435,12 @@ export const previewFormLeads = async (req, res) => {
       })
     }
 
+    // Synchronize the form's cached submission count with live Meta count
+    if (formConfig && config) {
+      formConfig.leadsCount = parsedLeads.length
+      await config.save()
+    }
+
     res.status(200).json({
       success: true,
       formId,
