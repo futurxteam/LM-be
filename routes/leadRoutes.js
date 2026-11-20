@@ -11,6 +11,7 @@ import {
   updateLeadStatus,
   updateLeadProfile,
   deleteLead,
+  bulkDeleteLeads,
   createLead,
   resetLeadDatabase,
 } from '../controllers/leadController.js'
@@ -55,6 +56,7 @@ router.post('/auto-assign', autoAssignLeads)
 router.post('/unassign', unassignLeads)
 
 // Status & Follow-ups
+router.post('/bulk-delete', bulkDeleteLeads)
 router.patch('/:id/status', updateLeadStatus)
 router.put('/:id/profile', updateLeadProfile)
 router.patch('/:id/profile', updateLeadProfile)

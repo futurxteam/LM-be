@@ -878,6 +878,47 @@ export const deleteLead = async (req, res) => {
 }
 
 // -------------------------------------------------------------
+// POST /api/leads/bulk-delete (Remove multiple leads by _id and/or metaLeadId)
+// -------------------------------------------------------------
+export const bulkDeleteLeads = async (req, res) => {
+  try {
+    const { leadIds = [], metaLeadIds = [] } = req.body || {}
+
+    const validObjectIds = (Array.isArray(leadIds) ? leadIds : [])
+      .filter(id => mongoose.Types.ObjectId.isValid(id))
+      .map(id => new mongoose.Types.ObjectId(id))
+
+    const cleanMetaIds = (Array.isArray(metaLeadIds) ? metaLeadIds : [])
+      .map(id => String(id || '').trim())
+      .filter(Boolean)
+
+    const orConditions = []
+    if (validObjectIds.length > 0) {
+      orConditions.push({ _id: { $in: validObjectIds } })
+    }
+    if (cleanMetaIds.length > 0) {
+      orConditions.push({ metaLeadId: { $in: cleanMetaIds } })
+    }
+
+    if (orConditions.length === 0) {
+      return res.status(400).json({
+        success: false,
+        message: 'Provide at least one valid leadId or metaLeadId to delete.',
+      })
+    }
+
+    const result = await Lead.deleteMany({ $or: orConditions })
+    res.status(200).json({
+      success: true,
+      deletedCount: result.deletedCount,
+      message: `Removed ${result.deletedCount} lead(s) from database.`,
+    })
+  } catch (error) {
+    res.status(500).json({ success: false, message: error.message })
+  }
+}
+
+// -------------------------------------------------------------
 // POST /api/leads/reset-db (Clean lead database - reseeding disabled)
 // -------------------------------------------------------------
 export const resetLeadDatabase = async (req, res) => {
