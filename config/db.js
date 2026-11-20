@@ -2,7 +2,6 @@ import mongoose from 'mongoose'
 import dotenv from 'dotenv'
 import path from 'path'
 import { fileURLToPath } from 'url'
-import { seedDatabase } from '../scripts/seedDB.js'
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
 dotenv.config({ path: path.join(__dirname, '../.env') })
@@ -25,9 +24,6 @@ export async function connectDB() {
     const conn = await mongoose.connect(dbConfig.url)
     console.log(`✅ MongoDB Connected: ${conn.connection.host} (DB: ${conn.connection.name})`)
     console.log('--------------------------------------------------')
-
-    // Seed database if empty
-    await seedDatabase(false)
   } catch (error) {
     console.error('❌ MongoDB Connection Error:', error.message)
     console.log('--------------------------------------------------')

@@ -3,7 +3,6 @@ import Lead from '../models/Lead.js'
 import User from '../models/User.js'
 import MetaIntegration from '../models/MetaIntegration.js'
 import { parseLeadsData, sanitizePhone } from '../utils/leadParser.js'
-import { seedDatabase } from '../scripts/seedDB.js'
 import { allocateLead } from '../services/allocationService.js'
 
 // -------------------------------------------------------------
@@ -879,43 +878,32 @@ export const deleteLead = async (req, res) => {
 }
 
 // -------------------------------------------------------------
-// POST /api/leads/reset-db (Temporary tool to clean / reset lead database)
+// POST /api/leads/reset-db (Clean lead database - reseeding disabled)
 // -------------------------------------------------------------
 export const resetLeadDatabase = async (req, res) => {
   try {
-    const { mode } = req.body // 'clean' to wipe all leads, or 'reseed' to restore default 34 leads
+    const { mode } = req.body
 
-    const now = new Date()
-
-    if (mode === 'clean') {
-      const deleteResult = await Lead.deleteMany({})
-      await MetaIntegration.updateMany({}, {
-        $set: {
-          lastSuccessfulSyncAt: now,
-          lastSyncMessage: 'Database cleaned: All leads wiped. Historical sync disabled to prevent resurrecting old submissions.',
-        },
-      })
-      return res.status(200).json({
-        success: true,
-        message: `Database cleaned: Deleted ${deleteResult.deletedCount} leads. The database is now empty.`,
-        deletedCount: deleteResult.deletedCount,
-        leadsCount: 0,
+    if (mode && mode !== 'clean') {
+      return res.status(400).json({
+        success: false,
+        message: 'Test/demo data reseeding is disabled.',
       })
     }
 
-    // Default 'reseed' mode
-    await seedDatabase(true)
+    const now = new Date()
+    const deleteResult = await Lead.deleteMany({})
     await MetaIntegration.updateMany({}, {
       $set: {
         lastSuccessfulSyncAt: now,
-        lastSyncMessage: 'Database reseeded: Restored baseline leads.',
+        lastSyncMessage: 'Database cleaned: All leads wiped. Historical sync disabled to prevent resurrecting old submissions.',
       },
     })
-    const count = await Lead.countDocuments()
     return res.status(200).json({
       success: true,
-      message: `Database reset & reseeded successfully! Restored ${count} initial leads.`,
-      leadsCount: count,
+      message: `Database cleaned: Deleted ${deleteResult.deletedCount} leads. The database is now empty.`,
+      deletedCount: deleteResult.deletedCount,
+      leadsCount: 0,
     })
   } catch (error) {
     res.status(500).json({ success: false, message: error.message })
