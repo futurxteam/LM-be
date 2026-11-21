@@ -446,6 +446,8 @@ export const getAdvancedReports = async (req, res) => {
           fullName: lead.fullName,
           phone: lead.phone,
           email: lead.email,
+          courseProgram: lead.courseProgram || lead.businessProgramName || '',
+          courseVariant: lead.courseVariant || lead.businessProgramVariant || '',
           lostReason: reason,
           lostCycleCount: lead.lostCycleCount,
           maxLostCycles,
@@ -529,6 +531,8 @@ export const getAdvancedReports = async (req, res) => {
         (row.phone || '').toLowerCase().includes(q) ||
         (row.email || '').toLowerCase().includes(q) ||
         (cleanId && (idStr.includes(cleanId) || metaIdStr.includes(cleanId))) ||
+        (row.courseProgram || '').toLowerCase().includes(q) ||
+        (row.courseVariant || '').toLowerCase().includes(q) ||
         (row.selectedCategoryLabel || '').toLowerCase().includes(q) ||
         (row.assignedTo?.repName || '').toLowerCase().includes(q) ||
         (row.lastLostBy?.repName || '').toLowerCase().includes(q) ||
@@ -562,6 +566,8 @@ export const getAdvancedReports = async (req, res) => {
       fullName: l.fullName,
       phone: l.phone,
       email: l.email,
+      courseProgram: l.courseProgram || l.businessProgramName || '',
+      courseVariant: l.courseVariant || l.businessProgramVariant || '',
       heatTier: l.heatTier || 'UNCLASSIFIED',
       leadStatus: l.leadStatus,
       selectedCategoryLabel: l.selectedCategoryLabel || l.subStatus || l.leadStatus,

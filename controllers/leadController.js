@@ -36,6 +36,8 @@ function buildLeadSearchCondition(rawSearch) {
     { phone: regex },
     { email: regex },
     { metaLeadId: idRegex },
+    { courseProgram: regex },
+    { courseVariant: regex },
     { qualification: regex },
     { preferredLocation: regex },
     { campaignName: regex },
@@ -1021,20 +1023,26 @@ export const assignLeads = async (req, res) => {
 }
 
 // -------------------------------------------------------------
-// POST /api/leads/auto-assign (Intelligent / Round-Robin in MongoDB)
+// POST /api/leads/auto-assign (Round-Robin Bulk Allocation in MongoDB)
 // -------------------------------------------------------------
 export const autoAssignLeads = async (req, res) => {
   try {
-    const { leadIds, mode = 'round-robin', search } = req.body || {}
+    const { leadIds, search } = req.body || {}
 
-    const activeReps = await User.find({ role: 'sales', active: true })
+    const activeReps = await User.find({ role: 'sales', active: { $ne: false } }).lean()
     if (!activeReps || activeReps.length === 0) {
       return res.status(400).json({ success: false, message: 'No active sales reps found in database' })
     }
 
     let query = { assignmentStatus: 'UNASSIGNED' }
     if (leadIds && Array.isArray(leadIds) && leadIds.length > 0) {
-      query = { _id: { $in: leadIds } }
+      const validIds = leadIds
+        .filter(id => mongoose.Types.ObjectId.isValid(id))
+        .map(id => new mongoose.Types.ObjectId(id))
+      if (validIds.length === 0) {
+        return res.status(400).json({ success: false, message: 'No valid leadIds provided' })
+      }
+      query = { _id: { $in: validIds } }
     } else {
       const searchCond = buildLeadSearchCondition(search)
       if (searchCond) {
@@ -1042,7 +1050,8 @@ export const autoAssignLeads = async (req, res) => {
       }
     }
 
-    const targetLeads = await Lead.find(query)
+    // Fetch minimal fields (.lean) and use bulkWrite so legacy schema validation or large pools never 500
+    const targetLeads = await Lead.find(query).select('_id status').lean()
     if (targetLeads.length === 0) {
       return res.status(200).json({
         success: true,
@@ -1051,55 +1060,52 @@ export const autoAssignLeads = async (req, res) => {
       })
     }
 
+    const now = new Date()
     let repIndex = 0
-    let assignedCount = 0
     const distribution = {}
     activeReps.forEach(r => (distribution[r.name] = 0))
 
-    const internationalRep = activeReps.find(r => r.specialty?.toLowerCase().includes('gcc') || r.title?.toLowerCase().includes('international')) || activeReps[0]
-
-    for (const lead of targetLeads) {
-      let chosenRep = null
-
-      if (mode === 'geo-smart') {
-        const loc = (lead.preferredLocation || '').toLowerCase()
-        const isAbroad =
-          loc.includes('uae') ||
-          loc.includes('dubai') ||
-          loc.includes('abu dhabi') ||
-          loc.includes('saudi') ||
-          loc.includes('gcc')
-
-        if (isAbroad) {
-          chosenRep = internationalRep
-        }
-      }
-
-      if (!chosenRep) {
-        chosenRep = activeReps[repIndex % activeReps.length]
-        repIndex++
-      }
-
-      lead.assignmentStatus = 'ASSIGNED'
-      lead.assignedTo = {
-        repId: chosenRep._id,
-        repName: chosenRep.name,
-        repRole: chosenRep.title || chosenRep.role,
-        assignedAt: new Date(),
-      }
-      lead.subStatus = 'Assigned - Pending First Call'
-      lead.notes.unshift({
-        text: `Auto-assigned to ${chosenRep.name} (${mode === 'geo-smart' ? 'Geo-Smart GCC Engine' : 'Round-Robin Engine'})`,
-        author: 'System Allocator',
-        status: lead.status,
-        subStatus: 'Assigned - Pending First Call',
-        timestamp: new Date(),
-      })
-
-      await lead.save()
+    const bulkOps = targetLeads.map(lead => {
+      const chosenRep = activeReps[repIndex % activeReps.length]
+      repIndex++
       distribution[chosenRep.name]++
-      assignedCount++
-    }
+
+      return {
+        updateOne: {
+          filter: { _id: lead._id },
+          update: {
+            $set: {
+              assignmentStatus: 'ASSIGNED',
+              assignedTo: {
+                repId: chosenRep._id,
+                repName: chosenRep.name,
+                repRole: chosenRep.title || chosenRep.role || 'Admissions Counselor',
+                assignedAt: now,
+              },
+              groupId: chosenRep.groupId || null,
+              subStatus: 'Assigned - Pending First Call',
+            },
+            $push: {
+              notes: {
+                $each: [
+                  {
+                    text: `Auto-assigned to ${chosenRep.name} (Round-Robin Engine)`,
+                    author: 'System Allocator',
+                    status: lead.status || 'Not Contacted',
+                    subStatus: 'Assigned - Pending First Call',
+                    timestamp: now,
+                  },
+                ],
+                $position: 0,
+              },
+            },
+          },
+        },
+      }
+    })
+
+    const bulkResult = await Lead.bulkWrite(bulkOps, { ordered: false })
+    const assignedCount = bulkResult.modifiedCount ?? targetLeads.length
 
     res.status(200).json({
       success: true,
@@ -1108,7 +1114,8 @@ export const autoAssignLeads = async (req, res) => {
       distribution,
     })
   } catch (error) {
-    res.status(500).json({ success: false, message: error.message })
+    console.error('[autoAssignLeads] Error:', error)
+    res.status(500).json({ success: false, message: error.message || 'Auto-assignment failed' })
   }
 }
 
