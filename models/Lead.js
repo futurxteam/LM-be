@@ -107,6 +107,13 @@ const leadSchema = new mongoose.Schema(
       repRole: { type: String },
       assignedAt: { type: Date },
     },
+    // Permanent record of the very first advisor allocated to this lead (never overwritten on reassignment/disable)
+    initialAdvisor: {
+      repId: { type: mongoose.Schema.Types.Mixed, ref: 'User' },
+      repName: { type: String },
+      repRole: { type: String },
+      assignedAt: { type: Date },
+    },
     groupId: {
       type: mongoose.Schema.Types.ObjectId,
       ref: 'CounselorGroup',

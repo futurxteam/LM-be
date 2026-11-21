@@ -699,7 +699,9 @@ export const getLeads = async (req, res) => {
 // -------------------------------------------------------------
 export const getSalesRepsList = async (req, res) => {
   try {
-    const reps = await User.find({ role: 'sales' }).lean()
+    const includeInactive = req.query?.includeInactive === 'true'
+    const repFilter = includeInactive ? { role: 'sales' } : { role: 'sales', active: { $ne: false } }
+    const reps = await User.find(repFilter).lean()
 
     const repStats = await Promise.all(
       reps.map(async rep => {
@@ -981,17 +983,42 @@ export const assignLeads = async (req, res) => {
       filterQuery = { _id: { $in: leadIds } }
     }
 
+    const now = new Date()
+    const assignedObj = {
+      repId: rep._id,
+      repName: rep.name,
+      repRole: rep.title || rep.role,
+      assignedAt: now,
+    }
+
+    // Preserve initialAdvisor on first assignment (never overwrite if already set)
+    await Lead.updateMany(
+      {
+        $and: [
+          filterQuery,
+          {
+            $or: [
+              { initialAdvisor: { $exists: false } },
+              { initialAdvisor: null },
+              { 'initialAdvisor.repId': { $exists: false } },
+              { 'initialAdvisor.repId': null },
+            ],
+          },
+        ],
+      },
+      {
+        $set: {
+          initialAdvisor: assignedObj,
+        },
+      }
+    )
+
     const updateResult = await Lead.updateMany(
       filterQuery,
       {
         $set: {
           assignmentStatus: 'ASSIGNED',
-          assignedTo: {
-            repId: rep._id,
-            repName: rep.name,
-            repRole: rep.title || rep.role,
-            assignedAt: new Date(),
-          },
+          assignedTo: assignedObj,
           groupId: rep.groupId || null,
           subStatus: 'Assigned - Pending First Call',
         },
@@ -1003,7 +1030,7 @@ export const assignLeads = async (req, res) => {
                 author: 'Admin',
                 status: 'Not Contacted',
                 subStatus: 'Assigned - Pending First Call',
-                timestamp: new Date(),
+                timestamp: now,
               },
             ],
             $position: 0,
@@ -1051,7 +1078,7 @@ export const autoAssignLeads = async (req, res) => {
     }
 
     // Fetch minimal fields (.lean) and use bulkWrite so legacy schema validation or large pools never 500
-    const targetLeads = await Lead.find(query).select('_id status').lean()
+    const targetLeads = await Lead.find(query).select('_id status initialAdvisor').lean()
     if (targetLeads.length === 0) {
       return res.status(200).json({
         success: true,
@@ -1070,21 +1097,28 @@ export const autoAssignLeads = async (req, res) => {
       repIndex++
       distribution[chosenRep.name]++
 
+      const assignedObj = {
+        repId: chosenRep._id,
+        repName: chosenRep.name,
+        repRole: chosenRep.title || chosenRep.role || 'Admissions Counselor',
+        assignedAt: now,
+      }
+
+      const setPayload = {
+        assignmentStatus: 'ASSIGNED',
+        assignedTo: assignedObj,
+        groupId: chosenRep.groupId || null,
+        subStatus: 'Assigned - Pending First Call',
+      }
+      if (!lead.initialAdvisor?.repId) {
+        setPayload.initialAdvisor = assignedObj
+      }
+
       return {
         updateOne: {
           filter: { _id: lead._id },
           update: {
-            $set: {
-              assignmentStatus: 'ASSIGNED',
-              assignedTo: {
-                repId: chosenRep._id,
-                repName: chosenRep.name,
-                repRole: chosenRep.title || chosenRep.role || 'Admissions Counselor',
-                assignedAt: now,
-              },
-              groupId: chosenRep.groupId || null,
-              subStatus: 'Assigned - Pending First Call',
-            },
+            $set: setPayload,
             $push: {
               notes: {
                 $each: [
@@ -1128,6 +1162,21 @@ export const unassignLeads = async (req, res) => {
     if (!leadIds || !Array.isArray(leadIds) || leadIds.length === 0) {
       return res.status(400).json({ success: false, message: 'leadIds array required' })
     }
+
+    // Preserve initialAdvisor from current assignedTo before unassigning
+    await Lead.updateMany(
+      {
+        _id: { $in: leadIds },
+        'assignedTo.repId': { $exists: true, $ne: null },
+        $or: [
+          { initialAdvisor: { $exists: false } },
+          { initialAdvisor: null },
+          { 'initialAdvisor.repId': { $exists: false } },
+          { 'initialAdvisor.repId': null },
+        ],
+      },
+      [{ $set: { initialAdvisor: '$assignedTo' } }]
+    )
 
     const result = await Lead.updateMany(
       { _id: { $in: leadIds } },
@@ -1272,14 +1321,32 @@ export const recycleLead = async (req, res) => {
     lead.isCycleEnded = false
     lead.cycleEndReason = null
 
+    // Preserve initialAdvisor before changing assignedTo on recycle
+    if (!lead.initialAdvisor?.repId) {
+      if (lead.assignedTo?.repId) {
+        lead.initialAdvisor = { ...lead.assignedTo }
+      } else if (lead.lastLostBy?.repId) {
+        lead.initialAdvisor = {
+          repId: lead.lastLostBy.repId,
+          repName: lead.lastLostBy.repName,
+          repRole: 'Admissions Counselor',
+          assignedAt: lead.lastLostBy.lostAt || lead.createdAt,
+        }
+      }
+    }
+
     let destinationText = 'System Pool (Unassigned)'
     if (assignedRep) {
-      lead.assignmentStatus = 'ASSIGNED'
-      lead.assignedTo = {
+      const nextAssigned = {
         repId: assignedRep._id,
         repName: assignedRep.name,
         repRole: assignedRep.title || 'Admissions Counselor',
         assignedAt: new Date(),
+      }
+      lead.assignmentStatus = 'ASSIGNED'
+      lead.assignedTo = nextAssigned
+      if (!lead.initialAdvisor?.repId) {
+        lead.initialAdvisor = nextAssigned
       }
       lead.groupId = assignedRep.groupId || null
       lead.subStatus =
@@ -1430,14 +1497,32 @@ export const bulkRecycleLeads = async (req, res) => {
       lead.isCycleEnded = false
       lead.cycleEndReason = null
 
+      // Preserve initialAdvisor before changing assignedTo on bulk recycle
+      if (!lead.initialAdvisor?.repId) {
+        if (lead.assignedTo?.repId) {
+          lead.initialAdvisor = { ...lead.assignedTo }
+        } else if (lead.lastLostBy?.repId) {
+          lead.initialAdvisor = {
+            repId: lead.lastLostBy.repId,
+            repName: lead.lastLostBy.repName,
+            repRole: 'Admissions Counselor',
+            assignedAt: lead.lastLostBy.lostAt || lead.createdAt,
+          }
+        }
+      }
+
       let destText = 'System Pool'
       if (chosenRep) {
-        lead.assignmentStatus = 'ASSIGNED'
-        lead.assignedTo = {
+        const nextAssigned = {
           repId: chosenRep._id,
           repName: chosenRep.name,
           repRole: chosenRep.title || 'Admissions Counselor',
           assignedAt: new Date(),
+        }
+        lead.assignmentStatus = 'ASSIGNED'
+        lead.assignedTo = nextAssigned
+        if (!lead.initialAdvisor?.repId) {
+          lead.initialAdvisor = nextAssigned
         }
         lead.groupId = chosenRep.groupId || null
         lead.subStatus =
@@ -1585,6 +1670,7 @@ export const createLead = async (req, res) => {
 
       assignmentStatus: leadAssignmentStatus,
       assignedTo: leadAssignedTo,
+      initialAdvisor: leadAssignedTo || null,
       groupId: leadGroupId,
 
       status: status || 'Not Contacted',
@@ -1758,17 +1844,27 @@ export const updateLeadProfile = async (req, res) => {
     // Assignment updates (Admin only can reassign or return to pool)
     if (!actor || actor.role === 'admin') {
       if (assignmentStatus === 'UNASSIGNED') {
+        if (!lead.initialAdvisor?.repId && lead.assignedTo?.repId) {
+          lead.initialAdvisor = { ...lead.assignedTo }
+        }
         lead.assignmentStatus = 'UNASSIGNED'
         lead.assignedTo = null
       } else if (assignedTo && (assignedTo.repId || assignedTo.id)) {
+        if (!lead.initialAdvisor?.repId && lead.assignedTo?.repId) {
+          lead.initialAdvisor = { ...lead.assignedTo }
+        }
         const repId = assignedTo.repId || assignedTo.id
         const counselor = await User.findById(repId)
-        lead.assignmentStatus = 'ASSIGNED'
-        lead.assignedTo = {
+        const nextAssigned = {
           repId: counselor ? counselor._id : repId,
           repName: counselor ? counselor.name : assignedTo.repName,
           repRole: counselor ? (counselor.title || 'Admissions Counselor') : 'Admissions Counselor',
           assignedAt: new Date(),
+        }
+        lead.assignmentStatus = 'ASSIGNED'
+        lead.assignedTo = nextAssigned
+        if (!lead.initialAdvisor?.repId) {
+          lead.initialAdvisor = nextAssigned
         }
         lead.groupId = counselor?.groupId || lead.groupId
       }

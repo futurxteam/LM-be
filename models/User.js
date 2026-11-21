@@ -10,6 +10,7 @@ const userSchema = new mongoose.Schema(
     specialty: { type: String, default: 'Healthcare Admissions' },
     avatar: { type: String, default: 'AC' },
     active: { type: Boolean, default: true },
+    disabledAt: { type: Date, default: null },
     groupId: { type: mongoose.Schema.Types.ObjectId, ref: 'CounselorGroup', default: null },
     isGroupManager: { type: Boolean, default: false },
   },

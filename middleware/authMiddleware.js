@@ -23,6 +23,14 @@ export async function attachUser(req, res, next) {
       if (mongoose.Types.ObjectId.isValid(userId)) {
         const userDoc = await User.findById(userId).lean()
         if (userDoc) {
+          // Immediately reject active sessions of disabled accounts on any non-auth route
+          if (userDoc.active === false && !req.path.startsWith('/api/auth')) {
+            return res.status(403).json({
+              success: false,
+              code: 'ACCOUNT_DISABLED',
+              message: 'Your account has been disabled. Please contact your Administrator.',
+            })
+          }
           req.user = {
             id: userDoc._id.toString(),
             _id: userDoc._id.toString(),
@@ -30,6 +38,7 @@ export async function attachUser(req, res, next) {
             email: userDoc.email,
             role: userDoc.role,
             title: userDoc.title,
+            active: userDoc.active !== false,
           }
           return next()
         }

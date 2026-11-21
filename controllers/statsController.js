@@ -640,6 +640,8 @@ export const getAdvancedReports = async (req, res) => {
         id: repIdStr,
         name: rep.name,
         title: rep.title || 'Admissions Counselor',
+        active: rep.active !== false,
+        disabledAt: rep.disabledAt || null,
         totalAssigned: repLeads.length,
         hot,
         warm,
