@@ -95,11 +95,17 @@ export async function allocateLead(formId) {
         })
 
         const resolvedCount = await Lead.countDocuments({
-          $or: [
-            { 'assignedTo.repId': counselor._id },
-            { 'assignedTo.repId': String(counselor._id) },
+          $and: [
+            {
+              $or: [
+                { 'assignedTo.repId': counselor._id },
+                { 'assignedTo.repId': String(counselor._id) },
+              ],
+            },
+            {
+              $or: [{ isDropped: true }, { isCompleted: true }],
+            },
           ],
-          $or: [{ isDropped: true }, { isCompleted: true }],
         })
 
         return {

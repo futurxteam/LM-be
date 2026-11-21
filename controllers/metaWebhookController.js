@@ -99,6 +99,17 @@ async function processLiveLead(leadgenId, formId, pageId) {
       return
     }
 
+    // Strictly gate ingestion to explicitly enabled (active: true) forms only
+    if (formId) {
+      const preFormConfig = config?.selectedForms?.find(f => String(f.formId) === String(formId))
+      if (!preFormConfig || !preFormConfig.active) {
+        console.log(
+          `⏭️ [Meta Webhook Ignored] Form "${preFormConfig?.formName || formId}" (ID: ${formId}) is NOT enabled (active: false). Skipping lead ${leadgenId} so it does not enter System Pool.`
+        )
+        return
+      }
+    }
+
     // 1. Fetch full candidate lead data from Meta Graph API
     console.log(`📡 [Meta Webhook] Querying Meta Graph API for leadgen_id: ${leadgenId}...`)
     let response
@@ -127,8 +138,15 @@ async function processLiveLead(leadgenId, formId, pageId) {
       return
     }
 
-    const formConfig = config?.selectedForms?.find(f => f.formId === String(formId || raw.form_id))
-    const formName = formConfig?.formName || 'Meta Lead Form'
+    const resolvedFormId = String(formId || raw.form_id || '')
+    const formConfig = config?.selectedForms?.find(f => String(f.formId) === resolvedFormId)
+    if (!formConfig || !formConfig.active) {
+      console.log(
+        `⏭️ [Meta Webhook Ignored] Form "${formConfig?.formName || resolvedFormId}" (ID: ${resolvedFormId}) is NOT enabled (active: false). Skipping lead ${leadgenId}.`
+      )
+      return
+    }
+    const formName = formConfig.formName || 'Meta Lead Form'
 
     // 2. Flatten field_data
     const rowData = {

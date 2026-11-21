@@ -109,31 +109,15 @@ export async function syncMetaLeads(manualToken, manualPageId, forceFullSync = f
 
   const GRAPH_URL = `https://graph.facebook.com/${graphVersion}`
 
-  // 1. Identify active forms
-  let activeForms = (config?.selectedForms || []).filter(f => f.active)
-
-  // If no saved active forms, query all forms on the page
-  if (activeForms.length === 0) {
-    const allForms = await fetchAllPages(
-      `${GRAPH_URL}/${pageId}/leadgen_forms`,
-      { fields: 'id,name,status,leads_count', limit: 100 },
-      token
-    )
-    activeForms = allForms.map(f => ({
-      formId: f.id,
-      formName: f.name || 'Meta Lead Form',
-      status: f.status || 'ACTIVE',
-      active: true,
-      leadsCount: f.leads_count || 0,
-    }))
-  }
+  // 1. Identify strictly enabled (active: true) forms — never auto-sync disabled forms
+  const activeForms = (config?.selectedForms || []).filter(f => f.active)
 
   if (activeForms.length === 0) {
     return {
       success: true,
       addedCount: 0,
       duplicatesCount: 0,
-      message: 'No lead forms found on this Facebook Page.',
+      message: 'No lead forms are currently enabled. Toggle a form ON to sync leads.',
     }
   }
 
