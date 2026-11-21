@@ -92,6 +92,7 @@ export async function allocateLead(formId) {
           ],
           isDropped: { $ne: true },
           isCompleted: { $ne: true },
+          isCycleEnded: { $ne: true },
         })
 
         const resolvedCount = await Lead.countDocuments({
@@ -103,7 +104,7 @@ export async function allocateLead(formId) {
               ],
             },
             {
-              $or: [{ isDropped: true }, { isCompleted: true }],
+              $or: [{ isDropped: true }, { isCompleted: true }, { isCycleEnded: true }],
             },
           ],
         })

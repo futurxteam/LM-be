@@ -9,12 +9,16 @@ import {
   autoAssignLeads,
   unassignLeads,
   updateLeadStatus,
+  addLeadStep,
+  recycleLead,
+  bulkRecycleLeads,
   updateLeadProfile,
   deleteLead,
   bulkDeleteLeads,
   createLead,
   resetLeadDatabase,
 } from '../controllers/leadController.js'
+import { requireAdmin } from '../middleware/authMiddleware.js'
 
 const router = express.Router()
 
@@ -55,12 +59,15 @@ router.post('/assign', assignLeads)
 router.post('/auto-assign', autoAssignLeads)
 router.post('/unassign', unassignLeads)
 
-// Status & Follow-ups
-router.post('/bulk-delete', bulkDeleteLeads)
+// Status, Steps & Lost Recycling
+router.post('/bulk-delete', requireAdmin, bulkDeleteLeads)
+router.post('/bulk-recycle', requireAdmin, bulkRecycleLeads)
+router.post('/:id/steps', addLeadStep)
+router.post('/:id/recycle', requireAdmin, recycleLead)
 router.patch('/:id/status', updateLeadStatus)
 router.put('/:id/profile', updateLeadProfile)
 router.patch('/:id/profile', updateLeadProfile)
-router.delete('/:id', deleteLead)
+router.delete('/:id', requireAdmin, deleteLead)
 
 // Temporary Reset / Clean Lead Database Tool
 router.post('/reset-db', resetLeadDatabase)

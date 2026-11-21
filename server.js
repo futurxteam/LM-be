@@ -16,6 +16,8 @@ import statsRoutes from './routes/statsRoutes.js'
 import metaRoutes from './routes/metaRoutes.js'
 import userRoutes from './routes/userRoutes.js'
 import groupRoutes from './routes/groupRoutes.js'
+import crmSettingsRoutes from './routes/crmSettingsRoutes.js'
+import { attachUser } from './middleware/authMiddleware.js'
 import { startMetaCron } from './services/metaCron.js'
 
 const app = express()
@@ -31,6 +33,7 @@ connectDB().then(() => {
 // Middlewares
 app.use(cors())
 app.use(express.json())
+app.use(attachUser)
 
 // Mount Modular Routes
 app.use('/api/auth', authRoutes)
@@ -39,6 +42,7 @@ app.use('/api/stats', statsRoutes)
 app.use('/api/meta', metaRoutes)
 app.use('/api/users', userRoutes)
 app.use('/api/groups', groupRoutes)
+app.use('/api/crm', crmSettingsRoutes)
 
 // Health Check
 app.get('/', (req, res) => {
