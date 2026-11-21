@@ -315,6 +315,7 @@ export const getAdvancedReports = async (req, res) => {
       fromDate,
       toDate,
       search,
+      lostSearch,
       page,
       limit,
       recyclePage,
@@ -441,6 +442,7 @@ export const getAdvancedReports = async (req, res) => {
         lostReasonMap[reason] = (lostReasonMap[reason] || 0) + 1
         const lostRow = {
           id: lead.id,
+          metaLeadId: lead.metaLeadId || '',
           fullName: lead.fullName,
           phone: lead.phone,
           email: lead.email,
@@ -516,6 +518,25 @@ export const getAdvancedReports = async (req, res) => {
       }
     })
 
+    const matchesLeadQuery = (row, rawQuery) => {
+      const q = String(rawQuery || '').trim().toLowerCase()
+      if (!q) return true
+      const cleanId = q.startsWith('#') ? q.slice(1).trim() : q
+      const idStr = String(row.id || row._id || '').toLowerCase()
+      const metaIdStr = String(row.metaLeadId || '').toLowerCase()
+      return (
+        (row.fullName || '').toLowerCase().includes(q) ||
+        (row.phone || '').toLowerCase().includes(q) ||
+        (row.email || '').toLowerCase().includes(q) ||
+        (cleanId && (idStr.includes(cleanId) || metaIdStr.includes(cleanId))) ||
+        (row.selectedCategoryLabel || '').toLowerCase().includes(q) ||
+        (row.assignedTo?.repName || '').toLowerCase().includes(q) ||
+        (row.lastLostBy?.repName || '').toLowerCase().includes(q) ||
+        (row.lostReason || '').toLowerCase().includes(q) ||
+        (row.businessProgramName || '').toLowerCase().includes(q)
+      )
+    }
+
     // 5. Filterable Hot / Warm / Cold Table Rows
     let tableLeads = normalizedLeads
     if (heatTier && heatTier !== 'All') {
@@ -525,15 +546,7 @@ export const getAdvancedReports = async (req, res) => {
       tableLeads = tableLeads.filter(l => l.leadStatus === leadStatus)
     }
     if (search && search.trim()) {
-      const q = search.trim().toLowerCase()
-      tableLeads = tableLeads.filter(
-        l =>
-          (l.fullName || '').toLowerCase().includes(q) ||
-          (l.phone || '').toLowerCase().includes(q) ||
-          (l.selectedCategoryLabel || '').toLowerCase().includes(q) ||
-          (l.assignedTo?.repName || '').toLowerCase().includes(q) ||
-          (l.businessProgramName || '').toLowerCase().includes(q)
-      )
+      tableLeads = tableLeads.filter(l => matchesLeadQuery(l, search))
     }
 
     const heatTableTotal = tableLeads.length
@@ -545,6 +558,7 @@ export const getAdvancedReports = async (req, res) => {
 
     const heatTableRows = heatPagedLeads.map(l => ({
       id: l.id,
+      metaLeadId: l.metaLeadId || '',
       fullName: l.fullName,
       phone: l.phone,
       email: l.email,
@@ -566,17 +580,25 @@ export const getAdvancedReports = async (req, res) => {
       createdAt: l.createdAt,
     }))
 
-    // Backend pagination for Recyclable Lost Leads & Max-Limit Lost Leads tables
-    const recycleTotal = recyclableLostLeads.length
+    // Backend pagination + optional search for Recyclable Lost Leads & Max-Limit Lost Leads tables
+    const filteredRecyclableLost =
+      lostSearch && lostSearch.trim()
+        ? recyclableLostLeads.filter(l => matchesLeadQuery(l, lostSearch))
+        : recyclableLostLeads
+    const recycleTotal = filteredRecyclableLost.length
     const recycleTotalPages = Math.max(1, Math.ceil(recycleTotal / recPageSize))
-    const pagedRecyclableLeads = recyclableLostLeads.slice(
+    const pagedRecyclableLeads = filteredRecyclableLost.slice(
       (recPageNum - 1) * recPageSize,
       recPageNum * recPageSize
     )
 
-    const maxLostTotal = maxLostLeads.length
+    const filteredMaxLost =
+      lostSearch && lostSearch.trim()
+        ? maxLostLeads.filter(l => matchesLeadQuery(l, lostSearch))
+        : maxLostLeads
+    const maxLostTotal = filteredMaxLost.length
     const maxLostTotalPages = Math.max(1, Math.ceil(maxLostTotal / maxLostPageSize))
-    const pagedMaxLostLeads = maxLostLeads.slice(
+    const pagedMaxLostLeads = filteredMaxLost.slice(
       (maxLostPageNum - 1) * maxLostPageSize,
       maxLostPageNum * maxLostPageSize
     )

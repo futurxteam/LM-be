@@ -14,6 +14,54 @@ import { parseLeadsData, sanitizePhone } from '../utils/leadParser.js'
 import { allocateLead } from '../services/allocationService.js'
 
 /**
+ * Escape special regex characters so phone numbers with '+' or symbols never crash RegExp
+ */
+function escapeRegex(str) {
+  return String(str || '').replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+}
+
+/**
+ * Build unified MongoDB search filter matching Name, Lead ID (_id / metaLeadId, with or without '#'),
+ * Phone Number, Email, Qualification, Location, Campaign, Category, and Program.
+ */
+function buildLeadSearchCondition(rawSearch) {
+  const trimmed = String(rawSearch || '').trim()
+  if (!trimmed) return null
+  const cleanIdTerm = trimmed.startsWith('#') ? trimmed.slice(1).trim() : trimmed
+  const regex = new RegExp(escapeRegex(trimmed), 'i')
+  const idRegex = cleanIdTerm ? new RegExp(escapeRegex(cleanIdTerm), 'i') : regex
+
+  const orConditions = [
+    { fullName: regex },
+    { phone: regex },
+    { email: regex },
+    { metaLeadId: idRegex },
+    { qualification: regex },
+    { preferredLocation: regex },
+    { campaignName: regex },
+    { selectedCategoryLabel: regex },
+    { businessProgramName: regex },
+  ]
+
+  if (cleanIdTerm) {
+    if (mongoose.Types.ObjectId.isValid(cleanIdTerm)) {
+      orConditions.push({ _id: new mongoose.Types.ObjectId(cleanIdTerm) })
+    }
+    orConditions.push({
+      $expr: {
+        $regexMatch: {
+          input: { $toString: '$_id' },
+          regex: escapeRegex(cleanIdTerm),
+          options: 'i',
+        },
+      },
+    })
+  }
+
+  return { $or: orConditions }
+}
+
+/**
  * Strip Admin-only heatTier classification for non-admin callers
  */
 function sanitizeLeadForRole(leadDoc, role) {
@@ -605,20 +653,9 @@ export const getLeads = async (req, res) => {
       andConditions.push({ qualification: new RegExp(qualification, 'i') })
     }
 
-    if (search && search.trim()) {
-      const regex = new RegExp(search.trim(), 'i')
-      andConditions.push({
-        $or: [
-          { fullName: regex },
-          { phone: regex },
-          { email: regex },
-          { qualification: regex },
-          { preferredLocation: regex },
-          { campaignName: regex },
-          { selectedCategoryLabel: regex },
-          { businessProgramName: regex },
-        ],
-      })
+    const searchCond = buildLeadSearchCondition(search)
+    if (searchCond) {
+      andConditions.push(searchCond)
     }
 
     const filter = andConditions.length > 0 ? { $and: andConditions } : {}
@@ -908,9 +945,10 @@ export const pasteLeads = async (req, res) => {
 // -------------------------------------------------------------
 export const assignLeads = async (req, res) => {
   try {
-    const { leadIds, repId } = req.body
+    const { leadIds, repId, applyToAll = false, scope, search } = req.body || {}
 
-    if (!leadIds || !Array.isArray(leadIds) || leadIds.length === 0) {
+    const isEntirePool = Boolean(applyToAll) && scope === 'pool'
+    if (!isEntirePool && (!leadIds || !Array.isArray(leadIds) || leadIds.length === 0)) {
       return res.status(400).json({ success: false, message: 'leadIds array is required' })
     }
 
@@ -931,8 +969,18 @@ export const assignLeads = async (req, res) => {
       return res.status(404).json({ success: false, message: 'Sales Representative not found in database' })
     }
 
+    let filterQuery
+    if (isEntirePool) {
+      const searchCond = buildLeadSearchCondition(search)
+      filterQuery = searchCond
+        ? { $and: [{ assignmentStatus: 'UNASSIGNED' }, searchCond] }
+        : { assignmentStatus: 'UNASSIGNED' }
+    } else {
+      filterQuery = { _id: { $in: leadIds } }
+    }
+
     const updateResult = await Lead.updateMany(
-      { _id: { $in: leadIds } },
+      filterQuery,
       {
         $set: {
           assignmentStatus: 'ASSIGNED',
@@ -977,7 +1025,7 @@ export const assignLeads = async (req, res) => {
 // -------------------------------------------------------------
 export const autoAssignLeads = async (req, res) => {
   try {
-    const { leadIds, mode = 'round-robin' } = req.body
+    const { leadIds, mode = 'round-robin', search } = req.body || {}
 
     const activeReps = await User.find({ role: 'sales', active: true })
     if (!activeReps || activeReps.length === 0) {
@@ -987,6 +1035,11 @@ export const autoAssignLeads = async (req, res) => {
     let query = { assignmentStatus: 'UNASSIGNED' }
     if (leadIds && Array.isArray(leadIds) && leadIds.length > 0) {
       query = { _id: { $in: leadIds } }
+    } else {
+      const searchCond = buildLeadSearchCondition(search)
+      if (searchCond) {
+        query = { $and: [{ assignmentStatus: 'UNASSIGNED' }, searchCond] }
+      }
     }
 
     const targetLeads = await Lead.find(query)
@@ -1757,17 +1810,53 @@ export const deleteLead = async (req, res) => {
 // -------------------------------------------------------------
 export const bulkDeleteLeads = async (req, res) => {
   try {
-    const { leadIds = [], metaLeadIds = [], applyToAll = false, scope } = req.body || {}
+    const { leadIds = [], metaLeadIds = [], applyToAll = false, scope, filters = {} } = req.body || {}
 
     if (applyToAll && scope) {
       const settings = await getOrCreateCrmSettings()
       const maxLostCycles = settings.maxLostCycles || 3
       let scopeFilter = null
+      let scopeLabel = 'list'
+
       if (scope === 'max_lost') {
         scopeFilter = { leadStatus: 'LOST', lostCycleCount: { $gte: maxLostCycles } }
+        scopeLabel = 'Max-Limit Lost list'
       } else if (scope === 'recyclable') {
         scopeFilter = { leadStatus: 'LOST', lostCycleCount: { $lt: maxLostCycles } }
+        scopeLabel = 'Recyclable Lost list'
+      } else if (scope === 'pool') {
+        const searchCond = buildLeadSearchCondition(filters?.search)
+        scopeFilter = searchCond
+          ? { $and: [{ assignmentStatus: 'UNASSIGNED' }, searchCond] }
+          : { assignmentStatus: 'UNASSIGNED' }
+        scopeLabel = 'System Pool'
+      } else if (scope === 'master') {
+        const andConditions = [{ assignmentStatus: 'ASSIGNED' }]
+        const { status, qualification, search } = filters || {}
+        if (status && status !== 'All') {
+          if (['HOT', 'WARM', 'COLD'].includes(status)) {
+            andConditions.push({ $or: [{ leadStatus: status }, { heatTier: status }] })
+          } else if (status === 'NEW LEAD') {
+            andConditions.push({
+              $or: [{ leadStatus: 'NEW LEAD' }, { leadStatus: { $exists: false } }, { leadStatus: null }],
+            })
+          } else if (LEAD_STATUSES.includes(status)) {
+            andConditions.push({ leadStatus: status })
+          } else {
+            andConditions.push({ status })
+          }
+        }
+        if (qualification && qualification !== 'All') {
+          andConditions.push({ qualification: new RegExp(escapeRegex(qualification), 'i') })
+        }
+        const searchCond = buildLeadSearchCondition(search)
+        if (searchCond) {
+          andConditions.push(searchCond)
+        }
+        scopeFilter = andConditions.length === 1 ? andConditions[0] : { $and: andConditions }
+        scopeLabel = 'Master Leads list'
       }
+
       if (!scopeFilter) {
         return res.status(400).json({ success: false, message: `Unsupported bulk-delete scope: "${scope}"` })
       }
@@ -1775,7 +1864,7 @@ export const bulkDeleteLeads = async (req, res) => {
       return res.status(200).json({
         success: true,
         deletedCount: result.deletedCount,
-        message: `Removed all ${result.deletedCount} lead(s) from ${scope === 'max_lost' ? 'Max-Limit Lost list' : 'Lost list'}.`,
+        message: `Removed all ${result.deletedCount} lead(s) from ${scopeLabel}.`,
       })
     }
 
