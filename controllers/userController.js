@@ -436,19 +436,12 @@ export const updateUser = async (req, res) => {
       return res.status(404).json({ success: false, message: 'User not found' })
     }
 
-    // Safety: prevent disabling the last active admin
-    if (active === false && user.role === 'admin') {
-      const otherActiveAdmins = await User.countDocuments({
-        role: 'admin',
-        active: { $ne: false },
-        _id: { $ne: user._id },
+    // Administrator accounts cannot be disabled
+    if (active === false && (user.role === 'admin' || role === 'admin')) {
+      return res.status(403).json({
+        success: false,
+        message: 'Administrator accounts cannot be disabled.',
       })
-      if (otherActiveAdmins === 0) {
-        return res.status(400).json({
-          success: false,
-          message: 'Cannot disable the only active system administrator account.',
-        })
-      }
     }
 
     if (groupId !== undefined) {
@@ -578,19 +571,12 @@ export const disableOrEnableUser = async (req, res) => {
       })
     }
 
-    // Safety: prevent disabling the last active admin
+    // Administrator accounts cannot be disabled
     if (user.role === 'admin') {
-      const otherActiveAdmins = await User.countDocuments({
-        role: 'admin',
-        active: { $ne: false },
-        _id: { $ne: user._id },
+      return res.status(403).json({
+        success: false,
+        message: 'Administrator accounts cannot be disabled.',
       })
-      if (otherActiveAdmins === 0) {
-        return res.status(400).json({
-          success: false,
-          message: 'Cannot disable the only active system administrator account.',
-        })
-      }
     }
 
     const idVariants = [user._id, user._id.toString()]
