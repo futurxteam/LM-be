@@ -936,10 +936,13 @@ export const assignLeads = async (req, res) => {
       {
         $set: {
           assignmentStatus: 'ASSIGNED',
-          'assignedTo.repId': rep._id,
-          'assignedTo.repName': rep.name,
-          'assignedTo.repRole': rep.title || rep.role,
-          'assignedTo.assignedAt': new Date(),
+          assignedTo: {
+            repId: rep._id,
+            repName: rep.name,
+            repRole: rep.title || rep.role,
+            assignedAt: new Date(),
+          },
+          groupId: rep.groupId || null,
           subStatus: 'Assigned - Pending First Call',
         },
         $push: {
