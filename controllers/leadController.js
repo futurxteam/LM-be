@@ -22,10 +22,14 @@ function sanitizeLeadForRole(leadDoc, role) {
   obj.leadStatus = obj.leadStatus || 'NEW LEAD'
   if (role !== 'admin') {
     delete obj.heatTier
+    delete obj.lostCycleCount
+    delete obj.canRecycle
+    delete obj.cycleEndReason
     if (Array.isArray(obj.steps)) {
       obj.steps = obj.steps.map(s => {
         const copy = { ...s }
         delete copy.heatTier
+        delete copy.cycleNumber
         return copy
       })
     }
@@ -84,7 +88,7 @@ async function applyLifecycleUpdate(lead, payload, actor, settings) {
       prevStatus === 'CONVERTED BUSINESS' && nextStatus === 'ONBOARDED BUSINESS'
     if (!isAllowedOnboardingProgress) {
       return {
-        error: `This lead has reached End of Cycle (${prevStatus}). Only an Administrator can modify it further.`,
+        error: 'This lead is closed. Contact an Administrator if further updates are needed.',
         statusCode: 403,
       }
     }
@@ -1057,10 +1061,11 @@ export const updateLeadStatus = async (req, res) => {
 
     res.status(200).json({
       success: true,
-      autoRecycled: result.autoRecycled || false,
-      message: result.autoRecycled
-        ? `Lead marked LOST and auto-recycled back to System Pool (Cycle #${lead.cycleNumber}).`
-        : 'Lead step & status updated successfully',
+      autoRecycled: actor?.role === 'admin' ? result.autoRecycled || false : undefined,
+      message:
+        actor?.role === 'admin' && result.autoRecycled
+          ? `Lead marked LOST and auto-recycled back to System Pool (Cycle #${lead.cycleNumber}).`
+          : 'Lead step & status updated successfully',
       lead: formatted,
     })
   } catch (error) {
@@ -1349,6 +1354,11 @@ export const createLead = async (req, res) => {
     const cleanProgram = courseProgram || 'Healthcare Management'
     const cleanVariant = cleanProgram === 'Healthcare Management' ? (courseVariant || '') : ''
 
+    const cleanState = String(state || '').trim()
+    const cleanOtherState = cleanState === 'Other' ? String(otherState || '').trim() : ''
+    const cleanDistrict = cleanState ? String(district || '').trim() : ''
+    const resolvedLocation = cleanDistrict || cleanOtherState || cleanState || 'Not Specified'
+
     const newLead = new Lead({
       metaLeadId: `manual_${Date.now()}`,
       fullName: nameVal,
@@ -1356,14 +1366,14 @@ export const createLead = async (req, res) => {
       email: (email || '').toLowerCase().trim(),
       qualification: qualification || 'Degree',
       age: age ? Number(age) : null,
-      state: state || 'Kerala',
-      otherState: state === 'Other' ? (otherState || '') : '',
-      district: state === 'Kerala' ? (district || 'Ernakulam') : 'Other',
+      state: cleanState,
+      otherState: cleanOtherState,
+      district: cleanDistrict,
       courseProgram: cleanProgram,
       courseVariant: cleanVariant,
       customerCategory: customerCategory || 'Ongoing Student',
 
-      preferredLocation: state === 'Kerala' ? (district || 'Kerala') : (otherState || 'Outside Kerala'),
+      preferredLocation: resolvedLocation,
       learningMode: 'Flexible',
       careerRole: 'Hospital Administration',
       platform: 'Manual Entry',
@@ -1466,9 +1476,25 @@ export const updateLeadProfile = async (req, res) => {
     if (email !== undefined) lead.email = (email || '').toLowerCase().trim()
     if (qualification) lead.qualification = qualification
     if (age !== undefined) lead.age = age ? Number(age) : null
-    if (state) lead.state = state
-    if (otherState !== undefined) lead.otherState = otherState
-    if (district !== undefined) lead.district = district
+    if (state !== undefined) lead.state = String(state || '').trim()
+    if (otherState !== undefined) lead.otherState = String(otherState || '').trim()
+    if (district !== undefined) lead.district = String(district || '').trim()
+
+    // Keep preferredLocation synchronized whenever geography/demography is updated
+    if (state !== undefined || otherState !== undefined || district !== undefined) {
+      const effectiveDistrict = lead.district ? lead.district.trim() : ''
+      const effectiveOtherState = lead.state === 'Other' ? (lead.otherState || '').trim() : ''
+      const effectiveState = (lead.state || '').trim()
+      const computedLoc =
+        effectiveDistrict ||
+        effectiveOtherState ||
+        (effectiveState && effectiveState !== 'Other' ? effectiveState : '')
+      if (computedLoc) {
+        lead.preferredLocation = computedLoc
+      } else if (!lead.preferredLocation || lead.preferredLocation === 'Not Specified') {
+        lead.preferredLocation = 'Not Specified'
+      }
+    }
     if (courseProgram) {
       lead.courseProgram = courseProgram
       if (courseProgram !== 'Healthcare Management') {

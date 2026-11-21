@@ -1,6 +1,7 @@
 import mongoose from 'mongoose'
 import Lead from '../models/Lead.js'
 import User from '../models/User.js'
+import CounselorGroup from '../models/CounselorGroup.js'
 import {
   getOrCreateCrmSettings,
   LEAD_STATUSES,
@@ -190,15 +191,54 @@ export const getStats = async (req, res) => {
       percentage: totalLeads > 0 ? Math.round((q.count / totalLeads) * 100) : 0,
     }))
 
-    // 7. Preferred Location Breakdown
+    // 7. Preferred Location / Saved District & State Demography Breakdown
     const locationAgg = await Lead.aggregate([
+      {
+        $addFields: {
+          effectiveLocation: {
+            $let: {
+              vars: {
+                d: { $trim: { input: { $ifNull: ['$district', ''] } } },
+                os: { $trim: { input: { $ifNull: ['$otherState', ''] } } },
+                pl: { $trim: { input: { $ifNull: ['$preferredLocation', ''] } } },
+                st: { $trim: { input: { $ifNull: ['$state', ''] } } },
+              },
+              in: {
+                $cond: [
+                  { $and: [{ $ne: ['$$d', ''] }, { $ne: ['$$d', 'Other'] }] },
+                  '$$d',
+                  {
+                    $cond: [
+                      { $ne: ['$$os', ''] },
+                      '$$os',
+                      {
+                        $cond: [
+                          { $and: [{ $ne: ['$$pl', ''] }, { $ne: ['$$pl', 'Not Specified'] }] },
+                          '$$pl',
+                          {
+                            $cond: [
+                              { $and: [{ $ne: ['$$st', ''] }, { $ne: ['$$st', 'Other'] }] },
+                              '$$st',
+                              'Not Specified',
+                            ],
+                          },
+                        ],
+                      },
+                    ],
+                  },
+                ],
+              },
+            },
+          },
+        },
+      },
       {
         $group: {
           _id: {
             $cond: [
               {
                 $regexMatch: {
-                  input: '$preferredLocation',
+                  input: '$effectiveLocation',
                   regex: /uae|dubai|abu dhabi|gcc|saudi/i,
                 },
               },
@@ -207,34 +247,12 @@ export const getStats = async (req, res) => {
                 $cond: [
                   {
                     $regexMatch: {
-                      input: '$preferredLocation',
+                      input: '$effectiveLocation',
                       regex: /kochi|ernakulam|ekm/i,
                     },
                   },
                   'Kochi / Ernakulam',
-                  {
-                    $cond: [
-                      {
-                        $regexMatch: {
-                          input: '$preferredLocation',
-                          regex: /palakkad/i,
-                        },
-                      },
-                      'Palakkad',
-                      {
-                        $cond: [
-                          {
-                            $regexMatch: {
-                              input: '$preferredLocation',
-                              regex: /thrissur|trichur/i,
-                            },
-                          },
-                          'Thrissur',
-                          '$preferredLocation',
-                        ],
-                      },
-                    ],
-                  },
+                  '$effectiveLocation',
                 ],
               },
             ],
@@ -243,7 +261,7 @@ export const getStats = async (req, res) => {
         },
       },
       { $sort: { count: -1 } },
-      { $limit: 8 },
+      { $limit: 15 },
     ])
 
     const locationReport = locationAgg.map(l => ({
@@ -282,9 +300,27 @@ export const getStats = async (req, res) => {
 // -------------------------------------------------------------
 export const getAdvancedReports = async (req, res) => {
   try {
-    const { heatTier, leadStatus, repId, programName, fromDate, toDate, search } = req.query
+    const {
+      heatTier,
+      leadStatus,
+      repId,
+      groupId,
+      programName,
+      fromDate,
+      toDate,
+      search,
+      page,
+      limit,
+      recyclePage,
+      recycleLimit,
+    } = req.query
     const settings = await getOrCreateCrmSettings()
     const maxLostCycles = settings.maxLostCycles || 3
+
+    const heatPageNum = Math.max(1, parseInt(page) || 1)
+    const heatPageSize = Math.max(1, parseInt(limit) || 30)
+    const recPageNum = Math.max(1, parseInt(recyclePage) || 1)
+    const recPageSize = Math.max(1, parseInt(recycleLimit) || 30)
 
     const andConditions = []
     if (fromDate || toDate) {
@@ -485,7 +521,14 @@ export const getAdvancedReports = async (req, res) => {
       )
     }
 
-    const heatTableRows = tableLeads.map(l => ({
+    const heatTableTotal = tableLeads.length
+    const heatTableTotalPages = Math.max(1, Math.ceil(heatTableTotal / heatPageSize))
+    const heatPagedLeads = tableLeads.slice(
+      (heatPageNum - 1) * heatPageSize,
+      heatPageNum * heatPageSize
+    )
+
+    const heatTableRows = heatPagedLeads.map(l => ({
       id: l.id,
       fullName: l.fullName,
       phone: l.phone,
@@ -508,8 +551,19 @@ export const getAdvancedReports = async (req, res) => {
       createdAt: l.createdAt,
     }))
 
+    // Backend pagination for Recyclable Lost Leads queue
+    const recycleTotal = recyclableLostLeads.length
+    const recycleTotalPages = Math.max(1, Math.ceil(recycleTotal / recPageSize))
+    const pagedRecyclableLeads = recyclableLostLeads.slice(
+      (recPageNum - 1) * recPageSize,
+      recPageNum * recPageSize
+    )
+
     // 6. Counselor Performance Matrix
-    const salesReps = await User.find({ role: 'sales' }).lean()
+    const [salesReps, counselorGroups] = await Promise.all([
+      User.find({ role: 'sales' }).lean(),
+      CounselorGroup.find().populate('managerId', 'name email title').lean(),
+    ])
     const counselorMatrix = salesReps.map(rep => {
       const repIdStr = rep._id.toString()
       const repLeads = normalizedLeads.filter(
@@ -555,6 +609,93 @@ export const getAdvancedReports = async (req, res) => {
       }
     })
 
+    // 7. Group-Wise Report (All CounselorGroups + Ungrouped Direct Counselors + System Pool)
+    const groupedLeadIds = new Set()
+    const buildGroupStats = (id, name, managerName, memberCount, groupLeads, isSystemBucket = false) => {
+      const hot = groupLeads.filter(l => l.heatTier === 'HOT').length
+      const warm = groupLeads.filter(l => l.heatTier === 'WARM').length
+      const cold = groupLeads.filter(l => l.heatTier === 'COLD').length
+      const newLeads = groupLeads.filter(l => l.leadStatus === 'NEW LEAD').length
+      const nonConnect = groupLeads.filter(l => l.leadStatus === 'NON-CONNECT').length
+      const nonProspect = groupLeads.filter(l => l.leadStatus === 'NON PROSPECT').length
+      const lost = groupLeads.filter(l => l.leadStatus === 'LOST').length
+      const qualified = groupLeads.filter(l => l.leadStatus === 'QUALIFIED BUSINESS').length
+      const converted = groupLeads.filter(l => l.leadStatus === 'CONVERTED BUSINESS').length
+      const onboarded = groupLeads.filter(l => l.leadStatus === 'ONBOARDED BUSINESS').length
+      const totalSteps = groupLeads.reduce((sum, l) => sum + (l.stepsCount || 0), 0)
+      const businessValue = groupLeads
+        .filter(l => BUSINESS_STATUSES.includes(l.leadStatus))
+        .reduce((sum, l) => sum + (Number(l.courseFees) || 0), 0)
+      const paidCollection = groupLeads
+        .filter(l => BUSINESS_STATUSES.includes(l.leadStatus))
+        .reduce((sum, l) => sum + (Number(l.paidAmount) || 0), 0)
+
+      return {
+        id,
+        groupName: name,
+        managerName: managerName || '—',
+        memberCount,
+        isSystemBucket,
+        totalLeads: groupLeads.length,
+        newLeads,
+        hot,
+        warm,
+        cold,
+        nonConnect,
+        nonProspect,
+        lost,
+        qualified,
+        converted,
+        onboarded,
+        totalSteps,
+        businessValue,
+        paidCollection,
+        pendingBalance: Math.max(0, businessValue - paidCollection),
+        conversionRate:
+          groupLeads.length > 0
+            ? Math.round(((converted + onboarded) / groupLeads.length) * 100)
+            : 0,
+      }
+    }
+
+    const groupReport = counselorGroups.map(grp => {
+      const grpIdStr = grp._id.toString()
+      const memberSet = new Set((grp.memberIds || []).map(m => String(m)))
+      if (grp.managerId?._id) memberSet.add(String(grp.managerId._id))
+
+      const matched = normalizedLeads.filter(l => {
+        const directGroupMatch = l.groupId && String(l.groupId) === grpIdStr
+        const memberMatch = l.assignedTo?.repId && memberSet.has(String(l.assignedTo.repId))
+        return directGroupMatch || memberMatch
+      })
+      matched.forEach(l => groupedLeadIds.add(l.id))
+
+      return buildGroupStats(
+        grpIdStr,
+        grp.name,
+        grp.managerId?.name || 'Unassigned',
+        (grp.memberIds || []).length,
+        matched,
+        false
+      )
+    })
+
+    const ungroupedAssigned = normalizedLeads.filter(
+      l => l.assignmentStatus === 'ASSIGNED' && !groupedLeadIds.has(l.id)
+    )
+    if (ungroupedAssigned.length > 0) {
+      groupReport.push(
+        buildGroupStats('ungrouped', 'Ungrouped / Direct Counselors', '—', 0, ungroupedAssigned, true)
+      )
+    }
+
+    const poolOnlyLeads = normalizedLeads.filter(l => l.assignmentStatus === 'UNASSIGNED')
+    if (poolOnlyLeads.length > 0) {
+      groupReport.push(
+        buildGroupStats('system_pool', 'Unassigned (System Pool)', '—', 0, poolOnlyLeads, true)
+      )
+    }
+
     res.status(200).json({
       success: true,
       policy: {
@@ -574,6 +715,12 @@ export const getAdvancedReports = async (req, res) => {
       },
       heatSummary,
       heatTableRows,
+      heatPagination: {
+        page: heatPageNum,
+        limit: heatPageSize,
+        total: heatTableTotal,
+        totalPages: heatTableTotalPages,
+      },
       lifecycleFunnel: LEAD_STATUSES.map(s => ({
         status: s,
         count: statusCounts[s].count,
@@ -589,7 +736,13 @@ export const getAdvancedReports = async (req, res) => {
           .map(([reason, count]) => ({ reason, count }))
           .sort((a, b) => b.count - a.count),
         cycleDistribution: Object.entries(lostCycleDist).map(([cycle, count]) => ({ cycle, count })),
-        recyclableLeads: recyclableLostLeads,
+        recyclableLeads: pagedRecyclableLeads,
+        pagination: {
+          page: recPageNum,
+          limit: recPageSize,
+          total: recycleTotal,
+          totalPages: recycleTotalPages,
+        },
       },
       financialReport: {
         totalBusinessValue,
@@ -609,6 +762,7 @@ export const getAdvancedReports = async (req, res) => {
           .sort((a, b) => b.businessValue - a.businessValue),
       },
       counselorMatrix,
+      groupReport,
     })
   } catch (error) {
     res.status(500).json({ success: false, message: error.message })

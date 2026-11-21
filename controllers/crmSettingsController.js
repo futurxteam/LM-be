@@ -19,7 +19,9 @@ export const getCrmMeta = async (req, res) => {
       key: cat.key,
       label: cat.label,
       leadStatus: cat.leadStatus,
-      group: cat.group,
+      group: isAdmin
+        ? cat.group
+        : String(cat.group || 'General').replace(/\s*\((End of Cycle|Recyclable)\)/gi, '').trim(),
       ...(isAdmin ? { heatTier: cat.heatTier || deriveHeatTierFromStatus(cat.leadStatus) } : {}),
     }))
 
@@ -31,11 +33,15 @@ export const getCrmMeta = async (req, res) => {
       lostReasons: settings.lostReasons || [],
       leadStatuses: LEAD_STATUSES,
       policy: {
-        maxLostCycles: settings.maxLostCycles,
-        lostRecycleMode: settings.lostRecycleMode,
         requireBusinessFields: settings.requireBusinessFields,
-        allowAdminBusinessFieldException: settings.allowAdminBusinessFieldException,
         allowSalesFinancialEdit: settings.allowSalesFinancialEdit,
+        ...(isAdmin
+          ? {
+              maxLostCycles: settings.maxLostCycles,
+              lostRecycleMode: settings.lostRecycleMode,
+              allowAdminBusinessFieldException: settings.allowAdminBusinessFieldException,
+            }
+          : {}),
       },
     })
   } catch (error) {

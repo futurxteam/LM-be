@@ -17,7 +17,21 @@ function generateAvatar(name) {
 // -------------------------------------------------------------
 export const getAllUsers = async (req, res) => {
   try {
-    const users = await User.find().sort({ role: 1, createdAt: -1 }).lean()
+    const { page, limit } = req.query
+    const isPaginated = page !== undefined || limit !== undefined
+    const pageNum = Math.max(1, parseInt(page) || 1)
+    const pageSize = Math.max(1, parseInt(limit) || 20)
+
+    const [totalCount, activeAdvisorsCount] = await Promise.all([
+      User.countDocuments(),
+      User.countDocuments({ role: 'sales', active: { $ne: false } }),
+    ])
+
+    let queryExec = User.find().sort({ role: 1, createdAt: -1 })
+    if (isPaginated) {
+      queryExec = queryExec.skip((pageNum - 1) * pageSize).limit(pageSize)
+    }
+    const users = await queryExec.lean()
 
     const usersWithStats = await Promise.all(
       users.map(async u => {
@@ -99,8 +113,11 @@ export const getAllUsers = async (req, res) => {
     res.status(200).json({
       success: true,
       users: usersWithStats,
-      totalCount: usersWithStats.length,
-      activeAdvisorsCount: usersWithStats.filter(u => u.role === 'sales' && u.active).length,
+      totalCount,
+      page: isPaginated ? pageNum : 1,
+      limit: isPaginated ? pageSize : totalCount,
+      totalPages: isPaginated ? Math.max(1, Math.ceil(totalCount / pageSize)) : 1,
+      activeAdvisorsCount,
     })
   } catch (error) {
     res.status(500).json({ success: false, message: error.message })
@@ -320,11 +337,10 @@ export const deleteUser = async (req, res) => {
 
     res.status(200).json({
       success: true,
-      message: `User ${user.name} removed successfully.${
-        assignedCount > 0 && reassignToPool
+      message: `User ${user.name} removed successfully.${assignedCount > 0 && reassignToPool
           ? ` ${assignedCount} assigned lead(s) returned to unassigned pool.`
           : ''
-      }`,
+        }`,
       returnedLeadsCount: reassignToPool ? assignedCount : 0,
     })
   } catch (error) {
