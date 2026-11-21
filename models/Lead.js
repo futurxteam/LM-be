@@ -145,6 +145,11 @@ const leadSchema = new mongoose.Schema(
     cycleNumber: { type: Number, default: 1 },
     lostCycleCount: { type: Number, default: 0, index: true },
     lostReason: { type: String, default: '' },
+    lastLostBy: {
+      repId: { type: mongoose.Schema.Types.Mixed, default: null },
+      repName: { type: String, default: '' },
+      lostAt: { type: Date, default: null },
+    },
     canRecycle: { type: Boolean, default: false, index: true },
     isCycleEnded: { type: Boolean, default: false, index: true },
     cycleEndReason: {

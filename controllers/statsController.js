@@ -313,6 +313,8 @@ export const getAdvancedReports = async (req, res) => {
       limit,
       recyclePage,
       recycleLimit,
+      maxLostPage,
+      maxLostLimit,
     } = req.query
     const settings = await getOrCreateCrmSettings()
     const maxLostCycles = settings.maxLostCycles || 3
@@ -321,6 +323,8 @@ export const getAdvancedReports = async (req, res) => {
     const heatPageSize = Math.max(1, parseInt(limit) || 30)
     const recPageNum = Math.max(1, parseInt(recyclePage) || 1)
     const recPageSize = Math.max(1, parseInt(recycleLimit) || 30)
+    const maxLostPageNum = Math.max(1, parseInt(maxLostPage) || 1)
+    const maxLostPageSize = Math.max(1, parseInt(maxLostLimit) || 30)
 
     const andConditions = []
     if (fromDate || toDate) {
@@ -394,6 +398,7 @@ export const getAdvancedReports = async (req, res) => {
     const lostReasonMap = {}
     const lostCycleDist = {}
     const recyclableLostLeads = []
+    const maxLostLeads = []
 
     // 4. Financial Report (Business Value = courseFees vs Actual Collected = paidAmount)
     let totalBusinessValue = 0
@@ -427,23 +432,26 @@ export const getAdvancedReports = async (req, res) => {
       if (lead.leadStatus === 'LOST') {
         const reason = lead.lostReason || lead.droppedReason || 'Unspecified'
         lostReasonMap[reason] = (lostReasonMap[reason] || 0) + 1
+        const lostRow = {
+          id: lead.id,
+          fullName: lead.fullName,
+          phone: lead.phone,
+          email: lead.email,
+          lostReason: reason,
+          lostCycleCount: lead.lostCycleCount,
+          maxLostCycles,
+          cycleNumber: lead.cycleNumber,
+          assignedTo: lead.assignedTo,
+          lastLostBy: lead.lastLostBy || (lead.assignedTo?.repName ? { repId: lead.assignedTo.repId, repName: lead.assignedTo.repName, lostAt: lead.updatedAt } : null),
+          updatedAt: lead.updatedAt,
+          stepsCount: lead.stepsCount,
+        }
         if (lead.lostCycleCount < maxLostCycles && !lead.isCycleEnded) {
           recyclableLostCount++
-          recyclableLostLeads.push({
-            id: lead.id,
-            fullName: lead.fullName,
-            phone: lead.phone,
-            email: lead.email,
-            lostReason: reason,
-            lostCycleCount: lead.lostCycleCount,
-            maxLostCycles,
-            cycleNumber: lead.cycleNumber,
-            assignedTo: lead.assignedTo,
-            updatedAt: lead.updatedAt,
-            stepsCount: lead.stepsCount,
-          })
+          recyclableLostLeads.push(lostRow)
         } else {
           permanentlyLostCount++
+          maxLostLeads.push(lostRow)
         }
       }
 
@@ -551,12 +559,19 @@ export const getAdvancedReports = async (req, res) => {
       createdAt: l.createdAt,
     }))
 
-    // Backend pagination for Recyclable Lost Leads queue
+    // Backend pagination for Recyclable Lost Leads & Max-Limit Lost Leads tables
     const recycleTotal = recyclableLostLeads.length
     const recycleTotalPages = Math.max(1, Math.ceil(recycleTotal / recPageSize))
     const pagedRecyclableLeads = recyclableLostLeads.slice(
       (recPageNum - 1) * recPageSize,
       recPageNum * recPageSize
+    )
+
+    const maxLostTotal = maxLostLeads.length
+    const maxLostTotalPages = Math.max(1, Math.ceil(maxLostTotal / maxLostPageSize))
+    const pagedMaxLostLeads = maxLostLeads.slice(
+      (maxLostPageNum - 1) * maxLostPageSize,
+      maxLostPageNum * maxLostPageSize
     )
 
     // 6. Counselor Performance Matrix
@@ -742,6 +757,13 @@ export const getAdvancedReports = async (req, res) => {
           limit: recPageSize,
           total: recycleTotal,
           totalPages: recycleTotalPages,
+        },
+        maxLostLeads: pagedMaxLostLeads,
+        maxLostPagination: {
+          page: maxLostPageNum,
+          limit: maxLostPageSize,
+          total: maxLostTotal,
+          totalPages: maxLostTotalPages,
         },
       },
       financialReport: {

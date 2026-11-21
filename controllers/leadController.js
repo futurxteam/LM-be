@@ -38,6 +38,58 @@ function sanitizeLeadForRole(leadDoc, role) {
 }
 
 /**
+ * Count meaningful interactions logged in the lead's current cycle
+ * (excludes system/admin recycle entries)
+ */
+function countCurrentCycleInteractions(lead) {
+  const currentCycle = lead.cycleNumber || 1
+  const steps = Array.isArray(lead.steps) ? lead.steps : []
+  const cycleSteps = steps.filter(
+    s =>
+      (s.cycleNumber || 1) === currentCycle &&
+      s.selectedCategory !== 'admin_recycled' &&
+      s.selectedCategory !== 'auto_recycled'
+  )
+  if (cycleSteps.length > 0) return cycleSteps.length
+  // Legacy fallback: only applies to cycle #1 leads created before steps[] existed
+  if (currentCycle === 1 && (lead.callAttempts || 0) > 0) return lead.callAttempts
+  return 0
+}
+
+/**
+ * Capacity-aware Round-Robin counselor picker for Lost Recycling
+ * Prefers active counselors other than excludeRepId when available
+ */
+async function pickRoundRobinCounselor(excludeRepId = null) {
+  const allActiveReps = await User.find({ role: 'sales', active: { $ne: false } }).lean()
+  if (allActiveReps.length === 0) return null
+
+  const filtered = excludeRepId
+    ? allActiveReps.filter(r => String(r._id) !== String(excludeRepId))
+    : allActiveReps
+  const pool = filtered.length > 0 ? filtered : allActiveReps
+
+  const stats = await Promise.all(
+    pool.map(async rep => {
+      const activeCount = await Lead.countDocuments({
+        $or: [
+          { 'assignedTo.repId': rep._id },
+          { 'assignedTo.repId': String(rep._id) },
+        ],
+        leadStatus: { $ne: 'LOST' },
+        isDropped: { $ne: true },
+        isCompleted: { $ne: true },
+        isCycleEnded: { $ne: true },
+      })
+      return { rep, activeCount }
+    })
+  )
+
+  stats.sort((a, b) => a.activeCount - b.activeCount)
+  return stats[0]?.rep || null
+}
+
+/**
  * Core lifecycle transition & step logger shared across status/step/profile updates
  */
 async function applyLifecycleUpdate(lead, payload, actor, settings) {
@@ -65,7 +117,7 @@ async function applyLifecycleUpdate(lead, payload, actor, settings) {
     droppedReason,
   } = payload
 
-  // End-of-cycle guard for Sales reps (allows CONVERTED BUSINESS -> ONBOARDED BUSINESS progression)
+  // Resolve outcome category & target status
   let matchedCategory = null
   if (categoryKey) {
     matchedCategory = (settings.outcomeCategories || []).find(
@@ -83,14 +135,27 @@ async function applyLifecycleUpdate(lead, payload, actor, settings) {
     nextStatus = requestedStatus
   }
 
-  if (lead.isCycleEnded && !isAdmin) {
+  // Irreversible terminal-status guard for Sales Reps
+  // LOST, CONVERTED BUSINESS, ONBOARDED BUSINESS, and NON PROSPECT cannot be reversed by Sales Reps
+  // (Only forward progression CONVERTED BUSINESS -> ONBOARDED BUSINESS is allowed for Sales)
+  const irreversibleForSales = ['LOST', 'NON PROSPECT', 'CONVERTED BUSINESS', 'ONBOARDED BUSINESS']
+  if (!isAdmin && (lead.isCycleEnded || irreversibleForSales.includes(prevStatus))) {
     const isAllowedOnboardingProgress =
       prevStatus === 'CONVERTED BUSINESS' && nextStatus === 'ONBOARDED BUSINESS'
     if (!isAllowedOnboardingProgress) {
       return {
-        error: 'This lead is closed. Contact an Administrator if further updates are needed.',
+        error: 'This lead status cannot be reversed by a Sales Counselor. Contact an Administrator if changes are needed.',
         statusCode: 403,
       }
+    }
+  }
+
+  // 1st-Interaction Unlock Gate: LOST, CONVERTED BUSINESS, and ONBOARDED BUSINESS unlock only after 1st interaction
+  const requiresFirstInteraction = ['LOST', 'CONVERTED BUSINESS', 'ONBOARDED BUSINESS']
+  if (!isAdmin && requiresFirstInteraction.includes(nextStatus) && countCurrentCycleInteractions(lead) === 0) {
+    return {
+      error: `${nextStatus} is locked until after the 1st interaction is logged for this lead.`,
+      statusCode: 400,
     }
   }
 
@@ -304,6 +369,11 @@ async function applyLifecycleUpdate(lead, payload, actor, settings) {
   } else if (nextStatus === 'LOST') {
     lead.lostReason = cleanLostReason || lead.lostReason
     lead.droppedReason = lead.lostReason
+    lead.lastLostBy = {
+      repId: lead.assignedTo?.repId || actorInfo.userId || null,
+      repName: lead.assignedTo?.repName || actorInfo.name || 'Counselor',
+      lostAt: new Date(),
+    }
     // Increment lostCycleCount when entering LOST from a non-LOST status
     if (prevStatus !== 'LOST') {
       lead.lostCycleCount = (lead.lostCycleCount || 0) + 1
@@ -456,6 +526,11 @@ export const getLeads = async (req, res) => {
 
     const callerRole = req.user?.role || (role === 'admin' ? 'admin' : 'sales')
     const andConditions = []
+
+    // Remove LOST leads from Sales Rep active queue & Team view (Admin sees them in Lost Business & Master list)
+    if (callerRole !== 'admin') {
+      andConditions.push({ leadStatus: { $ne: 'LOST' } })
+    }
 
     if (poolOnly === 'true') {
       andConditions.push({ assignmentStatus: 'UNASSIGNED' })
@@ -1077,12 +1152,13 @@ export const updateLeadStatus = async (req, res) => {
 export const addLeadStep = updateLeadStatus
 
 // -------------------------------------------------------------
-// POST /api/leads/:id/recycle (Admin-only: Recycle a LOST lead)
+// POST /api/leads/:id/recycle (Admin-only: Recycle a single LOST lead)
+// Supports recycleMethod: 'pool' | 'specific' | 'round-robin', plus force override
 // -------------------------------------------------------------
 export const recycleLead = async (req, res) => {
   try {
     const { id } = req.params
-    const { targetRepId, note, force } = req.body || {}
+    const { recycleMethod, targetRepId, note, force } = req.body || {}
 
     const lead = await Lead.findById(id)
     if (!lead) {
@@ -1102,8 +1178,23 @@ export const recycleLead = async (req, res) => {
     if (lead.lostCycleCount >= maxLostCycles && !force) {
       return res.status(400).json({
         success: false,
-        message: `Lead has reached the maximum allowed Lost cycles (${lead.lostCycleCount}/${maxLostCycles}).`,
+        message: `Lead has reached the maximum allowed Lost cycles (${lead.lostCycleCount}/${maxLostCycles}). Enable Admin Override to force recycle.`,
       })
+    }
+
+    const method =
+      recycleMethod ||
+      (targetRepId && mongoose.Types.ObjectId.isValid(targetRepId) ? 'specific' : 'pool')
+
+    let assignedRep = null
+    if (method === 'specific' && targetRepId && mongoose.Types.ObjectId.isValid(targetRepId)) {
+      assignedRep = await User.findById(targetRepId)
+      if (!assignedRep) {
+        return res.status(404).json({ success: false, message: 'Target counselor not found.' })
+      }
+    } else if (method === 'round-robin') {
+      const prevRepId = lead.lastLostBy?.repId || lead.assignedTo?.repId || null
+      assignedRep = await pickRoundRobinCounselor(prevRepId)
     }
 
     lead.cycleNumber = (lead.cycleNumber || 1) + 1
@@ -1119,20 +1210,20 @@ export const recycleLead = async (req, res) => {
     lead.cycleEndReason = null
 
     let destinationText = 'System Pool (Unassigned)'
-    if (targetRepId && mongoose.Types.ObjectId.isValid(targetRepId)) {
-      const rep = await User.findById(targetRepId)
-      if (rep) {
-        lead.assignmentStatus = 'ASSIGNED'
-        lead.assignedTo = {
-          repId: rep._id,
-          repName: rep.name,
-          repRole: rep.title || 'Admissions Counselor',
-          assignedAt: new Date(),
-        }
-        lead.groupId = rep.groupId || null
-        lead.subStatus = `Recycled to ${rep.name} (Cycle #${lead.cycleNumber})`
-        destinationText = rep.name
+    if (assignedRep) {
+      lead.assignmentStatus = 'ASSIGNED'
+      lead.assignedTo = {
+        repId: assignedRep._id,
+        repName: assignedRep.name,
+        repRole: assignedRep.title || 'Admissions Counselor',
+        assignedAt: new Date(),
       }
+      lead.groupId = assignedRep.groupId || null
+      lead.subStatus =
+        method === 'round-robin'
+          ? `Auto-Recycled (Round-Robin) to ${assignedRep.name} (Cycle #${lead.cycleNumber})`
+          : `Recycled to ${assignedRep.name} (Cycle #${lead.cycleNumber})`
+      destinationText = `${assignedRep.name}${method === 'round-robin' ? ' (Auto Round-Robin)' : ''}`
     } else {
       lead.assignmentStatus = 'UNASSIGNED'
       lead.assignedTo = null
@@ -1152,7 +1243,7 @@ export const recycleLead = async (req, res) => {
       previousStatus: 'LOST',
       newStatus: 'NEW LEAD',
       selectedCategory: 'admin_recycled',
-      selectedCategoryLabel: `Recycled by Admin → ${destinationText} (Cycle #${lead.cycleNumber})`,
+      selectedCategoryLabel: `${force ? 'Admin Override Recycle' : 'Recycled by Admin'} → ${destinationText} (Cycle #${lead.cycleNumber})`,
       heatTier: null,
       note:
         String(note || '').trim() ||
@@ -1190,30 +1281,65 @@ export const recycleLead = async (req, res) => {
 }
 
 // -------------------------------------------------------------
-// POST /api/leads/bulk-recycle (Admin-only: Bulk recycle LOST leads)
+// POST /api/leads/bulk-recycle (Admin-only: Bulk or Entire-List recycle of LOST leads)
+// Supports recycleMethod: 'pool' | 'specific' | 'round-robin', applyToAll, scope ('recyclable' | 'max_lost'), force
 // -------------------------------------------------------------
 export const bulkRecycleLeads = async (req, res) => {
   try {
-    const { leadIds = [], targetRepId, note } = req.body || {}
-    const validIds = (Array.isArray(leadIds) ? leadIds : []).filter(id =>
-      mongoose.Types.ObjectId.isValid(id)
-    )
-    if (validIds.length === 0) {
-      return res.status(400).json({ success: false, message: 'Select at least one lead to recycle.' })
-    }
+    const {
+      leadIds = [],
+      recycleMethod,
+      targetRepId,
+      note,
+      force = false,
+      applyToAll = false,
+      scope = 'recyclable',
+    } = req.body || {}
 
     const settings = await getOrCreateCrmSettings()
     const maxLostCycles = settings.maxLostCycles || 3
-    const targetRep =
-      targetRepId && mongoose.Types.ObjectId.isValid(targetRepId)
+
+    const query = { leadStatus: 'LOST' }
+    if (applyToAll) {
+      if (scope === 'max_lost') {
+        query.lostCycleCount = { $gte: maxLostCycles }
+      } else {
+        query.lostCycleCount = { $lt: maxLostCycles }
+      }
+    } else {
+      const validIds = (Array.isArray(leadIds) ? leadIds : []).filter(id =>
+        mongoose.Types.ObjectId.isValid(id)
+      )
+      if (validIds.length === 0) {
+        return res.status(400).json({ success: false, message: 'Select at least one lead to recycle.' })
+      }
+      query._id = { $in: validIds }
+      if (!force && scope !== 'max_lost') {
+        query.lostCycleCount = { $lt: maxLostCycles }
+      }
+    }
+
+    const method =
+      recycleMethod ||
+      (targetRepId && mongoose.Types.ObjectId.isValid(targetRepId) ? 'specific' : 'pool')
+
+    const specificRep =
+      method === 'specific' && targetRepId && mongoose.Types.ObjectId.isValid(targetRepId)
         ? await User.findById(targetRepId)
         : null
 
-    const leads = await Lead.find({
-      _id: { $in: validIds },
-      leadStatus: 'LOST',
-      lostCycleCount: { $lt: maxLostCycles },
-    })
+    if (method === 'specific' && !specificRep) {
+      return res.status(400).json({ success: false, message: 'Please select a valid target counselor.' })
+    }
+
+    const leads = await Lead.find(query)
+    if (leads.length === 0) {
+      return res.status(200).json({
+        success: true,
+        recycledCount: 0,
+        message: 'No matching LOST leads found to recycle.',
+      })
+    }
 
     const actorInfo = {
       userId: req.user?.id || '',
@@ -1223,6 +1349,12 @@ export const bulkRecycleLeads = async (req, res) => {
 
     let recycledCount = 0
     for (const lead of leads) {
+      let chosenRep = specificRep
+      if (method === 'round-robin') {
+        const prevRepId = lead.lastLostBy?.repId || lead.assignedTo?.repId || null
+        chosenRep = await pickRoundRobinCounselor(prevRepId)
+      }
+
       lead.cycleNumber = (lead.cycleNumber || 1) + 1
       lead.leadStatus = 'NEW LEAD'
       lead.selectedCategory = ''
@@ -1235,16 +1367,21 @@ export const bulkRecycleLeads = async (req, res) => {
       lead.isCycleEnded = false
       lead.cycleEndReason = null
 
-      if (targetRep) {
+      let destText = 'System Pool'
+      if (chosenRep) {
         lead.assignmentStatus = 'ASSIGNED'
         lead.assignedTo = {
-          repId: targetRep._id,
-          repName: targetRep.name,
-          repRole: targetRep.title || 'Admissions Counselor',
+          repId: chosenRep._id,
+          repName: chosenRep.name,
+          repRole: chosenRep.title || 'Admissions Counselor',
           assignedAt: new Date(),
         }
-        lead.groupId = targetRep.groupId || null
-        lead.subStatus = `Recycled to ${targetRep.name} (Cycle #${lead.cycleNumber})`
+        lead.groupId = chosenRep.groupId || null
+        lead.subStatus =
+          method === 'round-robin'
+            ? `Auto-Recycled (Round-Robin) to ${chosenRep.name} (Cycle #${lead.cycleNumber})`
+            : `Recycled to ${chosenRep.name} (Cycle #${lead.cycleNumber})`
+        destText = `${chosenRep.name}${method === 'round-robin' ? ' (Round-Robin)' : ''}`
       } else {
         lead.assignmentStatus = 'UNASSIGNED'
         lead.assignedTo = null
@@ -1258,9 +1395,9 @@ export const bulkRecycleLeads = async (req, res) => {
         previousStatus: 'LOST',
         newStatus: 'NEW LEAD',
         selectedCategory: 'admin_recycled',
-        selectedCategoryLabel: `Bulk Recycled by Admin (Cycle #${lead.cycleNumber})`,
+        selectedCategoryLabel: `${force || scope === 'max_lost' ? 'Admin Override Recycle' : 'Bulk Recycled by Admin'} → ${destText} (Cycle #${lead.cycleNumber})`,
         heatTier: null,
-        note: String(note || '').trim() || `Bulk recycled by ${actorInfo.name} (Cycle #${lead.cycleNumber}).`,
+        note: String(note || '').trim() || `Recycled by ${actorInfo.name} → ${destText} (Cycle #${lead.cycleNumber}).`,
         lostReason: '',
         callbackAt: null,
         businessSnapshot: {
@@ -1281,7 +1418,7 @@ export const bulkRecycleLeads = async (req, res) => {
     res.status(200).json({
       success: true,
       recycledCount,
-      message: `Recycled ${recycledCount} eligible LOST lead(s).`,
+      message: `Recycled ${recycledCount} LOST lead(s) (${method === 'round-robin' ? 'Auto Round-Robin' : method === 'specific' ? specificRep?.name : 'System Pool'}).`,
     })
   } catch (error) {
     res.status(500).json({ success: false, message: error.message })
@@ -1613,11 +1750,31 @@ export const deleteLead = async (req, res) => {
 }
 
 // -------------------------------------------------------------
-// POST /api/leads/bulk-delete (Remove multiple leads by _id and/or metaLeadId)
+// POST /api/leads/bulk-delete (Remove multiple leads by _id, metaLeadId, or entire scope)
 // -------------------------------------------------------------
 export const bulkDeleteLeads = async (req, res) => {
   try {
-    const { leadIds = [], metaLeadIds = [] } = req.body || {}
+    const { leadIds = [], metaLeadIds = [], applyToAll = false, scope } = req.body || {}
+
+    if (applyToAll && scope) {
+      const settings = await getOrCreateCrmSettings()
+      const maxLostCycles = settings.maxLostCycles || 3
+      let scopeFilter = null
+      if (scope === 'max_lost') {
+        scopeFilter = { leadStatus: 'LOST', lostCycleCount: { $gte: maxLostCycles } }
+      } else if (scope === 'recyclable') {
+        scopeFilter = { leadStatus: 'LOST', lostCycleCount: { $lt: maxLostCycles } }
+      }
+      if (!scopeFilter) {
+        return res.status(400).json({ success: false, message: `Unsupported bulk-delete scope: "${scope}"` })
+      }
+      const result = await Lead.deleteMany(scopeFilter)
+      return res.status(200).json({
+        success: true,
+        deletedCount: result.deletedCount,
+        message: `Removed all ${result.deletedCount} lead(s) from ${scope === 'max_lost' ? 'Max-Limit Lost list' : 'Lost list'}.`,
+      })
+    }
 
     const validObjectIds = (Array.isArray(leadIds) ? leadIds : [])
       .filter(id => mongoose.Types.ObjectId.isValid(id))
