@@ -492,6 +492,16 @@ export const getLeads = async (req, res) => {
         andConditions.push({ assignmentStatus: 'UNASSIGNED' })
       } else if (status === 'Assigned') {
         andConditions.push({ assignmentStatus: 'ASSIGNED' })
+      } else if (['HOT', 'WARM', 'COLD'].includes(status) && callerRole === 'admin') {
+        // Admin Hot/Warm/Cold filter includes all leads classified under that heat tier
+        // (e.g., COLD includes COLD + NON-CONNECT + NON PROSPECT + LOST; HOT includes HOT + Business milestones)
+        andConditions.push({
+          $or: [{ leadStatus: status }, { heatTier: status }],
+        })
+      } else if (status === 'NEW LEAD') {
+        andConditions.push({
+          $or: [{ leadStatus: 'NEW LEAD' }, { leadStatus: { $exists: false } }, { leadStatus: null }],
+        })
       } else if (LEAD_STATUSES.includes(status)) {
         andConditions.push({ leadStatus: status })
       } else {
