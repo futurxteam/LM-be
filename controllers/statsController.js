@@ -11,17 +11,25 @@ import {
 
 export const getStats = async (req, res) => {
   try {
-    const totalLeads = await Lead.countDocuments()
+    // Keep poolCount only for the Assign Pool badge; all report figures & demographics use ASSIGNED leads only
+    const assignedMatch = { assignmentStatus: 'ASSIGNED' }
     const poolCount = await Lead.countDocuments({ assignmentStatus: 'UNASSIGNED' })
-    const assignedCount = await Lead.countDocuments({ assignmentStatus: 'ASSIGNED' })
-    const contactedCount = await Lead.countDocuments({ status: 'Contacted' })
-    const notContactedCount = await Lead.countDocuments({ status: 'Not Contacted' })
-    const enrolledCount = await Lead.countDocuments({ subStatus: { $regex: /enrolled/i } })
+    const assignedCount = await Lead.countDocuments(assignedMatch)
+    const totalLeads = assignedCount
+    const contactedCount = await Lead.countDocuments({ ...assignedMatch, status: 'Contacted' })
+    const notContactedCount = await Lead.countDocuments({ ...assignedMatch, status: 'Not Contacted' })
+    const enrolledCount = await Lead.countDocuments({
+      ...assignedMatch,
+      $or: [
+        { leadStatus: { $in: ['CONVERTED BUSINESS', 'ONBOARDED BUSINESS'] } },
+        { subStatus: { $regex: /enrolled/i } },
+      ],
+    })
 
     const contactRate = assignedCount > 0 ? Math.round((contactedCount / assignedCount) * 100) : 0
-    const conversionRate = totalLeads > 0 ? Math.round((enrolledCount / totalLeads) * 100) : 0
+    const conversionRate = assignedCount > 0 ? Math.round((enrolledCount / assignedCount) * 100) : 0
 
-    // 1. Success Status Report (Success vs Pending vs In Pool)
+    // 1. Success Status Report (Assigned leads only — System Pool excluded from reports)
     const successStatusReport = [
       {
         status: 'Contacted (Engaged)',
@@ -39,22 +47,16 @@ export const getStats = async (req, res) => {
       },
       {
         status: 'Not Contacted (Pending Outreach)',
-        count: notContactedCount - poolCount,
-        percentage: totalLeads > 0 ? Math.round(((notContactedCount - poolCount) / totalLeads) * 100) : 0,
+        count: notContactedCount,
+        percentage: totalLeads > 0 ? Math.round((notContactedCount / totalLeads) * 100) : 0,
         color: '#f59e0b',
         type: 'pending',
       },
-      {
-        status: 'Unassigned in Lead Pool',
-        count: poolCount,
-        percentage: totalLeads > 0 ? Math.round((poolCount / totalLeads) * 100) : 0,
-        color: '#8b5cf6',
-        type: 'pool',
-      },
     ]
 
-    // 2. Current Stage Report (Granular Sub-Stages)
+    // 2. Current Stage Report (Assigned leads only)
     const stageAgg = await Lead.aggregate([
+      { $match: assignedMatch },
       {
         $group: {
           _id: '$subStatus',
@@ -144,8 +146,9 @@ export const getStats = async (req, res) => {
       })
     )
 
-    // 4. Campaign Attribution Aggregation
+    // 4. Campaign Attribution Aggregation (Assigned leads only)
     const campaignAgg = await Lead.aggregate([
+      { $match: assignedMatch },
       {
         $group: {
           _id: '$campaignName',
@@ -169,8 +172,9 @@ export const getStats = async (req, res) => {
       contactRate: c.total > 0 ? Math.round((c.contacted / c.total) * 100) : 0,
     }))
 
-    // 5. Platform Split (Instagram vs Facebook)
+    // 5. Platform Split (Instagram vs Facebook - Assigned leads only)
     const platformAgg = await Lead.aggregate([
+      { $match: assignedMatch },
       { $group: { _id: '$platform', count: { $sum: 1 } } },
       { $sort: { count: -1 } },
     ])
@@ -180,8 +184,9 @@ export const getStats = async (req, res) => {
       percentage: totalLeads > 0 ? Math.round((p.count / totalLeads) * 100) : 0,
     }))
 
-    // 6. Qualification Breakdown
+    // 6. Qualification Breakdown (Assigned leads only)
     const qualAgg = await Lead.aggregate([
+      { $match: assignedMatch },
       { $group: { _id: '$qualification', count: { $sum: 1 } } },
       { $sort: { count: -1 } },
     ])
@@ -191,8 +196,9 @@ export const getStats = async (req, res) => {
       percentage: totalLeads > 0 ? Math.round((q.count / totalLeads) * 100) : 0,
     }))
 
-    // 7. Preferred Location / Saved District & State Demography Breakdown
+    // 7. Preferred Location / Saved District & State Demography Breakdown (Assigned leads only)
     const locationAgg = await Lead.aggregate([
+      { $match: assignedMatch },
       {
         $addFields: {
           effectiveLocation: {
@@ -326,7 +332,8 @@ export const getAdvancedReports = async (req, res) => {
     const maxLostPageNum = Math.max(1, parseInt(maxLostPage) || 1)
     const maxLostPageSize = Math.max(1, parseInt(maxLostLimit) || 30)
 
-    const andConditions = []
+    // Exclude System Pool (UNASSIGNED) leads from all reports — System Pool appears only in Assign Pool tab
+    const andConditions = [{ assignmentStatus: 'ASSIGNED' }]
     if (fromDate || toDate) {
       const dateFilter = {}
       if (fromDate) dateFilter.$gte = new Date(fromDate)
@@ -701,13 +708,6 @@ export const getAdvancedReports = async (req, res) => {
     if (ungroupedAssigned.length > 0) {
       groupReport.push(
         buildGroupStats('ungrouped', 'Ungrouped / Direct Counselors', '—', 0, ungroupedAssigned, true)
-      )
-    }
-
-    const poolOnlyLeads = normalizedLeads.filter(l => l.assignmentStatus === 'UNASSIGNED')
-    if (poolOnlyLeads.length > 0) {
-      groupReport.push(
-        buildGroupStats('system_pool', 'Unassigned (System Pool)', '—', 0, poolOnlyLeads, true)
       )
     }
 

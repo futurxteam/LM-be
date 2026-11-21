@@ -534,36 +534,36 @@ export const getLeads = async (req, res) => {
 
     if (poolOnly === 'true') {
       andConditions.push({ assignmentStatus: 'UNASSIGNED' })
-    } else if (repId) {
-      if (mongoose.Types.ObjectId.isValid(repId)) {
-        const objId = new mongoose.Types.ObjectId(repId)
-        andConditions.push({
-          $or: [
-            { 'assignedTo.repId': objId },
-            { 'assignedTo.repId': repId },
-          ],
-        })
-      } else {
-        const matchedUser = await User.findOne({
-          $or: [
-            { email: new RegExp(repId, 'i') },
-            { name: new RegExp(repId, 'i') },
-            { role: 'sales' },
-          ],
-        })
-        if (matchedUser) {
+    } else {
+      // Never show System Pool (UNASSIGNED) leads anywhere outside the Assign Pool tab
+      andConditions.push({ assignmentStatus: 'ASSIGNED' })
+      if (repId) {
+        if (mongoose.Types.ObjectId.isValid(repId)) {
+          const objId = new mongoose.Types.ObjectId(repId)
           andConditions.push({
             $or: [
-              { 'assignedTo.repId': matchedUser._id },
-              { 'assignedTo.repId': matchedUser._id.toString() },
+              { 'assignedTo.repId': objId },
+              { 'assignedTo.repId': repId },
             ],
           })
         } else {
-          andConditions.push({ assignmentStatus: 'ASSIGNED' })
+          const matchedUser = await User.findOne({
+            $or: [
+              { email: new RegExp(repId, 'i') },
+              { name: new RegExp(repId, 'i') },
+              { role: 'sales' },
+            ],
+          })
+          if (matchedUser) {
+            andConditions.push({
+              $or: [
+                { 'assignedTo.repId': matchedUser._id },
+                { 'assignedTo.repId': matchedUser._id.toString() },
+              ],
+            })
+          }
         }
       }
-    } else if (role === 'sales') {
-      andConditions.push({ assignmentStatus: 'ASSIGNED' })
     }
 
     if (status && status !== 'All') {
@@ -1265,7 +1265,7 @@ export const recycleLead = async (req, res) => {
     })
 
     lead.notes.unshift({
-      text: `♻️ Recycled by ${actorInfo.name} → ${destinationText} (Cycle #${lead.cycleNumber})`,
+      text: `Recycled by ${actorInfo.name} -> ${destinationText} (Cycle #${lead.cycleNumber})`,
       author: actorInfo.name,
       status: lead.status,
       subStatus: lead.subStatus,

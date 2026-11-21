@@ -226,8 +226,8 @@ async function processLiveLead(leadgenId, formId, pageId) {
       notes: [
         {
           text: allocation.assignedTo
-            ? `⚡ Live Webhook Ingestion: Automatically assigned to Counselor ${allocation.assignedTo.repName} (Form: "${formName}")`
-            : `⚡ Live Webhook Ingestion: Added to system pool from form: "${formName}"`,
+            ? `Live Webhook Ingestion: Automatically assigned to Counselor ${allocation.assignedTo.repName} (Form: "${formName}")`
+            : `Live Webhook Ingestion: Added to system pool from form: "${formName}"`,
           author: 'Meta Real-Time Allocation Engine',
           status: 'Not Contacted',
           subStatus: allocation.assignedTo ? 'Assigned to Counselor' : 'New Lead In Pool',
