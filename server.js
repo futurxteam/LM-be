@@ -30,8 +30,34 @@ connectDB().then(() => {
   console.error('Failed to connect to DB:', err.message)
 })
 
+// CORS Configuration
+const allowedOrigins = new Set([
+  'https://sales.futureaceacademy.com',
+  'http://sales.futureaceacademy.com',
+  'https://www.sales.futureaceacademy.com',
+
+  ...(process.env.CORS_ORIGINS
+    ? process.env.CORS_ORIGINS.split(',').map(o => o.trim()).filter(Boolean)
+    : []),
+])
+
+const corsOptions = {
+  origin(origin, callback) {
+    // Allow non-browser / server-to-server requests (Meta webhooks, health checks, curl)
+    if (!origin || allowedOrigins.has(origin)) {
+      return callback(null, true)
+    }
+    return callback(new Error(`CORS blocked for origin: ${origin}`))
+  },
+  credentials: true,
+  methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
+  allowedHeaders: ['Content-Type', 'Authorization', 'X-Requested-With'],
+  optionsSuccessStatus: 204,
+}
+
 // Middlewares
-app.use(cors())
+app.use(cors(corsOptions))
+app.options('*', cors(corsOptions))
 app.use(express.json())
 app.use(attachUser)
 
