@@ -219,6 +219,7 @@ async function processLiveLead(leadgenId, formId, pageId) {
       createdTime: parsed.createdTime ? new Date(parsed.createdTime) : new Date(),
       assignmentStatus: allocation.assignmentStatus,
       assignedTo: allocation.assignedTo,
+      initialAdvisor: allocation.assignedTo || null,
       groupId: allocation.groupId,
       status: 'Not Contacted',
       subStatus: allocation.assignedTo ? 'Assigned to Counselor' : 'New Lead In Pool',
@@ -226,9 +227,9 @@ async function processLiveLead(leadgenId, formId, pageId) {
       notes: [
         {
           text: allocation.assignedTo
-            ? `Live Webhook Ingestion: Automatically assigned to Counselor ${allocation.assignedTo.repName} (Form: "${formName}")`
-            : `Live Webhook Ingestion: Added to system pool from form: "${formName}"`,
-          author: 'Meta Real-Time Allocation Engine',
+            ? `Live Lead from Meta — Assigned to ${allocation.assignedTo.repName} (Form: "${formName}")`
+            : `Live Lead from Meta — Added to System Pool (Form: "${formName}")`,
+          author: 'Live Lead from Meta',
           status: 'Not Contacted',
           subStatus: allocation.assignedTo ? 'Assigned to Counselor' : 'New Lead In Pool',
           timestamp: new Date(),

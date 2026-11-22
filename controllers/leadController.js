@@ -1987,6 +1987,14 @@ export const updateLeadProfile = async (req, res) => {
       author,
     } = req.body
 
+    // Quick Mark Completed / Mark Dropped via profile update is Admin-only
+    if (actor && actor.role !== 'admin' && (isCompleted !== undefined || isDropped !== undefined)) {
+      return res.status(403).json({
+        success: false,
+        message: 'Quick Mark Completed / Mark Dropped is restricted to Administrators only.',
+      })
+    }
+
     if (fullName) lead.fullName = fullName.trim()
     if (phone !== undefined) lead.phone = sanitizePhone(phone)
     if (email !== undefined) lead.email = (email || '').toLowerCase().trim()
