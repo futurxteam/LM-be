@@ -190,11 +190,12 @@ async function applyLifecycleUpdate(lead, payload, actor, settings) {
 
   // Irreversible terminal-status guard for Sales Reps
   // LOST, CONVERTED BUSINESS, ONBOARDED BUSINESS, and NON PROSPECT cannot be reversed by Sales Reps
-  // (Only forward progression CONVERTED BUSINESS -> ONBOARDED BUSINESS is allowed for Sales)
+  // (Only staying on CONVERTED BUSINESS for installments/notes or advancing CONVERTED -> ONBOARDED is allowed for Sales)
   const irreversibleForSales = ['LOST', 'NON PROSPECT', 'CONVERTED BUSINESS', 'ONBOARDED BUSINESS']
   if (!isAdmin && (lead.isCycleEnded || irreversibleForSales.includes(prevStatus))) {
     const isAllowedOnboardingProgress =
-      prevStatus === 'CONVERTED BUSINESS' && nextStatus === 'ONBOARDED BUSINESS'
+      prevStatus === 'CONVERTED BUSINESS' &&
+      (nextStatus === 'ONBOARDED BUSINESS' || nextStatus === 'CONVERTED BUSINESS')
     if (!isAllowedOnboardingProgress) {
       return {
         error: 'This lead status cannot be reversed by a Sales Counselor. Contact an Administrator if changes are needed.',
