@@ -809,6 +809,139 @@ export const getLeads = async (req, res) => {
 }
 
 // -------------------------------------------------------------
+// GET /api/leads/schedule (Next Contact / Follow-Up Schedule for Sales & Admin)
+// Returns Selected Day, Next Day, and Overdue callbacks + per-counselor breakdown
+// -------------------------------------------------------------
+export const getFollowupSchedule = async (req, res) => {
+  try {
+    const isAdmin = req.user?.role === 'admin'
+    const callerId = String(req.user?.id || req.user?._id || '')
+    const {
+      date,
+      tzOffset = 0,
+      repId = 'All',
+      search = '',
+    } = req.query
+
+    const offsetNum = Number(tzOffset) || 0
+    const offsetMs = offsetNum * 60 * 1000
+
+    // Compute selected local YYYY-MM-DD (default to caller's local today)
+    let selectedDateStr = typeof date === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(date.trim())
+      ? date.trim()
+      : null
+    if (!selectedDateStr) {
+      const localNow = new Date(Date.now() - offsetMs)
+      selectedDateStr = localNow.toISOString().slice(0, 10)
+    }
+
+    const [y, m, d] = selectedDateStr.split('-').map(Number)
+    const selectedDayStart = new Date(Date.UTC(y, m - 1, d, 0, 0, 0, 0) + offsetMs)
+    const selectedDayEnd = new Date(Date.UTC(y, m - 1, d, 23, 59, 59, 999) + offsetMs)
+    const nextDayStart = new Date(selectedDayStart.getTime() + 86400000)
+    const nextDayEnd = new Date(selectedDayEnd.getTime() + 86400000)
+    const nextDateStr = new Date(Date.UTC(y, m - 1, d + 1)).toISOString().slice(0, 10)
+
+    // Active assigned leads with a scheduled callbackAt (never System Pool, Lost, Non-Prospect, or Onboarded)
+    const andConditions = [
+      { assignmentStatus: 'ASSIGNED' },
+      { callbackAt: { $ne: null } },
+      { leadStatus: { $nin: ['LOST', 'NON PROSPECT', 'ONBOARDED BUSINESS'] } },
+      { isCycleEnded: { $ne: true } },
+      { isDropped: { $ne: true } },
+    ]
+
+    if (!isAdmin) {
+      const idVariants = [callerId]
+      if (mongoose.Types.ObjectId.isValid(callerId)) {
+        idVariants.push(new mongoose.Types.ObjectId(callerId))
+      }
+      andConditions.push({ 'assignedTo.repId': { $in: idVariants } })
+    } else if (repId && repId !== 'All') {
+      const idVariants = [repId]
+      if (mongoose.Types.ObjectId.isValid(repId)) {
+        idVariants.push(new mongoose.Types.ObjectId(repId))
+      }
+      andConditions.push({ 'assignedTo.repId': { $in: idVariants } })
+    }
+
+    const searchCond = buildLeadSearchCondition(search)
+    if (searchCond) {
+      andConditions.push(searchCond)
+    }
+
+    const leads = await Lead.find({ $and: andConditions })
+      .sort({ callbackAt: 1 })
+      .lean()
+
+    const callerRole = isAdmin ? 'admin' : 'sales'
+    const selectedDayLeads = []
+    const nextDayLeads = []
+    const overdueLeads = []
+    let laterCount = 0
+
+    const counselorMap = {}
+
+    for (const rawLead of leads) {
+      const cb = rawLead.callbackAt ? new Date(rawLead.callbackAt) : null
+      if (!cb || Number.isNaN(cb.getTime())) continue
+
+      const formatted = sanitizeLeadForRole(rawLead, callerRole)
+      const rId = rawLead.assignedTo?.repId ? String(rawLead.assignedTo.repId) : 'unassigned'
+      const rName = rawLead.assignedTo?.repName || 'Unassigned'
+      if (!counselorMap[rId]) {
+        counselorMap[rId] = {
+          repId: rId,
+          repName: rName,
+          selectedDayCount: 0,
+          nextDayCount: 0,
+          overdueCount: 0,
+          totalCount: 0,
+        }
+      }
+
+      if (cb >= selectedDayStart && cb <= selectedDayEnd) {
+        selectedDayLeads.push(formatted)
+        counselorMap[rId].selectedDayCount++
+        counselorMap[rId].totalCount++
+      } else if (cb >= nextDayStart && cb <= nextDayEnd) {
+        nextDayLeads.push(formatted)
+        counselorMap[rId].nextDayCount++
+        counselorMap[rId].totalCount++
+      } else if (cb < selectedDayStart) {
+        overdueLeads.push(formatted)
+        counselorMap[rId].overdueCount++
+        counselorMap[rId].totalCount++
+      } else {
+        laterCount++
+      }
+    }
+
+    const byCounselor = Object.values(counselorMap).sort(
+      (a, b) => (b.selectedDayCount + b.overdueCount) - (a.selectedDayCount + a.overdueCount)
+    )
+
+    res.status(200).json({
+      success: true,
+      selectedDate: selectedDateStr,
+      nextDate: nextDateStr,
+      counts: {
+        selectedDay: selectedDayLeads.length,
+        nextDay: nextDayLeads.length,
+        overdue: overdueLeads.length,
+        later: laterCount,
+      },
+      selectedDayLeads,
+      nextDayLeads,
+      overdueLeads,
+      byCounselor: isAdmin ? byCounselor : undefined,
+    })
+  } catch (error) {
+    res.status(500).json({ success: false, message: error.message })
+  }
+}
+
+// -------------------------------------------------------------
 // GET /api/leads/reps
 // -------------------------------------------------------------
 export const getSalesRepsList = async (req, res) => {

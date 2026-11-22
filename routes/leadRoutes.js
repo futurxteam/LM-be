@@ -2,6 +2,7 @@ import express from 'express'
 import multer from 'multer'
 import {
   getLeads,
+  getFollowupSchedule,
   getSalesRepsList,
   uploadLeads,
   pasteLeads,
@@ -48,6 +49,7 @@ const upload = multer({
 
 // Query & Read
 router.get('/', getLeads)
+router.get('/schedule', getFollowupSchedule)
 router.get('/reps', getSalesRepsList)
 
 // Create & Ingestion
