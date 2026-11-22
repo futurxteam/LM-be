@@ -276,6 +276,27 @@ export const getStats = async (req, res) => {
       percentage: totalLeads > 0 ? Math.round((l.count / totalLeads) * 100) : 0,
     }))
 
+    const businessAgg = await Lead.aggregate([
+      { $match: { assignmentStatus: 'ASSIGNED', leadStatus: { $in: BUSINESS_STATUSES } } },
+      {
+        $group: {
+          _id: null,
+          qualifiedCount: { $sum: { $cond: [{ $eq: ['$leadStatus', 'QUALIFIED BUSINESS'] }, 1, 0] } },
+          convertedCount: { $sum: { $cond: [{ $eq: ['$leadStatus', 'CONVERTED BUSINESS'] }, 1, 0] } },
+          onboardedCount: { $sum: { $cond: [{ $eq: ['$leadStatus', 'ONBOARDED BUSINESS'] }, 1, 0] } },
+          businessTurnover: { $sum: { $ifNull: ['$courseFees', 0] } },
+          salesRevenue: { $sum: { $ifNull: ['$paidAmount', 0] } },
+        },
+      },
+    ])
+    const bizSummary = businessAgg[0] || {
+      qualifiedCount: 0,
+      convertedCount: 0,
+      onboardedCount: 0,
+      businessTurnover: 0,
+      salesRevenue: 0,
+    }
+
     res.status(200).json({
       success: true,
       totalLeads,
@@ -286,6 +307,11 @@ export const getStats = async (req, res) => {
       enrolledCount,
       contactRate,
       conversionRate,
+      qualifiedCount: bizSummary.qualifiedCount,
+      convertedCount: bizSummary.convertedCount,
+      onboardedCount: bizSummary.onboardedCount,
+      businessTurnover: bizSummary.businessTurnover,
+      salesRevenue: bizSummary.salesRevenue,
       successStatusReport,
       stageReport,
       repsReport,
@@ -815,6 +841,338 @@ export const getAdvancedReports = async (req, res) => {
       },
       counselorMatrix,
       groupReport,
+    })
+  } catch (error) {
+    res.status(500).json({ success: false, message: error.message })
+  }
+}
+
+// -------------------------------------------------------------
+// GET /api/stats/frd-reports (FRD Section 7: Business, Lead Conversion & Lead Status Reports)
+// - Admin sees all counselors, teams, and Lead Status Report (HOT/WARM/COLD — Admin-Only)
+// - Sales sees only their own (or managed team) Business Report (7.1) & Lead Conversion Report (7.2)
+// -------------------------------------------------------------
+export const getFrdReports = async (req, res) => {
+  try {
+    const isAdmin = req.user?.role === 'admin'
+    const callerId = String(req.user?.id || req.user?._id || '')
+    const {
+      period = 'till_date', // 'current_month' | 'till_date' | 'custom'
+      fromDate = '',
+      toDate = '',
+      dateBasis = 'assignedAt', // 'assignedAt' | 'createdAt' | 'updatedAt'
+      milestoneMode = 'current', // 'current' | 'ever_reached'
+      repId = 'All',
+      groupId = 'All',
+      programName = 'All',
+      source = 'All',
+    } = req.query
+
+    // Resolve date window
+    let startDateObj = null
+    let endDateObj = null
+    if (period === 'current_month') {
+      const now = new Date()
+      startDateObj = new Date(now.getFullYear(), now.getMonth(), 1, 0, 0, 0, 0)
+      endDateObj = new Date(now.getFullYear(), now.getMonth() + 1, 0, 23, 59, 59, 999)
+    } else if (period === 'custom' && (fromDate || toDate)) {
+      if (fromDate) startDateObj = new Date(`${fromDate}T00:00:00.000`)
+      if (toDate) endDateObj = new Date(`${toDate}T23:59:59.999`)
+    }
+
+    const [allSalesReps, counselorGroups] = await Promise.all([
+      User.find({ role: 'sales' }).sort({ active: -1, name: 1 }).lean(),
+      CounselorGroup.find().populate('managerId', 'name email').lean(),
+    ])
+
+    // Determine visible reps based on role
+    let scopedRepIds = null
+    if (!isAdmin) {
+      const managedGroups = counselorGroups.filter(
+        g => g.managerId && String(g.managerId._id || g.managerId) === callerId
+      )
+      if (managedGroups.length > 0 && req.query.scope === 'team') {
+        const set = new Set([callerId])
+        managedGroups.forEach(g => (g.memberIds || []).forEach(m => set.add(String(m))))
+        scopedRepIds = Array.from(set)
+      } else {
+        scopedRepIds = [callerId]
+      }
+    } else if (groupId && groupId !== 'All') {
+      const grp = counselorGroups.find(g => String(g._id) === String(groupId))
+      if (grp) {
+        const set = new Set((grp.memberIds || []).map(m => String(m)))
+        if (grp.managerId?._id) set.add(String(grp.managerId._id))
+        scopedRepIds = Array.from(set)
+      }
+    }
+
+    // Never include System Pool (UNASSIGNED) leads outside Assign Pool tab
+    const andConditions = [{ assignmentStatus: 'ASSIGNED' }]
+
+    if (scopedRepIds && scopedRepIds.length > 0) {
+      const variants = []
+      for (const rid of scopedRepIds) {
+        variants.push(rid)
+        if (mongoose.Types.ObjectId.isValid(rid)) variants.push(new mongoose.Types.ObjectId(rid))
+      }
+      andConditions.push({ 'assignedTo.repId': { $in: variants } })
+    }
+
+    if (isAdmin && repId && repId !== 'All') {
+      if (mongoose.Types.ObjectId.isValid(repId)) {
+        andConditions.push({
+          $or: [
+            { 'assignedTo.repId': new mongoose.Types.ObjectId(repId) },
+            { 'assignedTo.repId': repId },
+          ],
+        })
+      } else {
+        andConditions.push({ 'assignedTo.repId': repId })
+      }
+    }
+
+    if (programName && programName !== 'All') {
+      andConditions.push({
+        $or: [{ businessProgramName: programName }, { courseProgram: programName }],
+      })
+    }
+
+    if (source && source !== 'All') {
+      andConditions.push({
+        $or: [{ platform: source }, { campaignName: source }],
+      })
+    }
+
+    const rawAssignedLeads = await Lead.find(
+      andConditions.length === 1 ? andConditions[0] : { $and: andConditions }
+    )
+      .select(
+        'assignedTo initialAdvisor leadStatus heatTier courseProgram businessProgramName platform campaignName courseFees paidAmount overpaidFlag milestoneHistory steps createdAt updatedAt'
+      )
+      .lean()
+
+    // Apply Date Basis filter cleanly (supports assignedTo.assignedAt with fallback to createdAt)
+    const cohortLeads = rawAssignedLeads.filter(l => {
+      if (!startDateObj && !endDateObj) return true
+      let basisDate = l.createdAt
+      if (dateBasis === 'assignedAt') {
+        basisDate = l.assignedTo?.assignedAt || l.createdAt
+      } else if (dateBasis === 'updatedAt') {
+        basisDate = l.updatedAt || l.createdAt
+      }
+      const d = basisDate ? new Date(basisDate) : null
+      if (!d || Number.isNaN(d.getTime())) return false
+      if (startDateObj && d < startDateObj) return false
+      if (endDateObj && d > endDateObj) return false
+      return true
+    })
+
+    // Helper: check if lead reached a milestone (either current status or ever_reached)
+    const hasReachedMilestone = (lead, targetStatus) => {
+      const cur = lead.leadStatus || 'NEW LEAD'
+      if (milestoneMode !== 'ever_reached') {
+        return cur === targetStatus
+      }
+      if (cur === targetStatus) return true
+      if (targetStatus === 'QUALIFIED BUSINESS' && lead.milestoneHistory?.qualifiedAt) return true
+      if (targetStatus === 'CONVERTED BUSINESS' && lead.milestoneHistory?.convertedAt) return true
+      if (targetStatus === 'ONBOARDED BUSINESS' && lead.milestoneHistory?.onboardedAt) return true
+      if (Array.isArray(lead.steps) && lead.steps.some(s => s.newStatus === targetStatus)) return true
+      return false
+    }
+
+    const roundPct = (num, den) => (den > 0 ? Number(((num / den) * 100).toFixed(1)) : 0)
+
+    // Determine rows of users to report on
+    const visibleReps = allSalesReps.filter(rep => {
+      const idStr = rep._id.toString()
+      if (scopedRepIds && !scopedRepIds.includes(idStr)) return false
+      if (isAdmin && repId && repId !== 'All' && String(repId) !== idStr) return false
+      return true
+    })
+
+    const businessReport = []
+    const conversionReport = []
+    const statusReport = []
+
+    const kpiTotals = {
+      leadsAllocated: cohortLeads.length,
+      aggregateBusinessCount: 0,
+      aggregateTurnover: 0,
+      aggregateSalesRevenue: 0,
+      qualifiedCount: 0,
+      qualifiedTurnover: 0,
+      qualifiedRevenue: 0,
+      convertedCount: 0,
+      convertedTurnover: 0,
+      convertedRevenue: 0,
+      onboardedCount: 0,
+      onboardedTurnover: 0,
+      onboardedRevenue: 0,
+      overpaidCount: 0,
+    }
+
+    for (const rep of visibleReps) {
+      const repIdStr = rep._id.toString()
+      const userLeads = cohortLeads.filter(
+        l => l.assignedTo?.repId && String(l.assignedTo.repId) === repIdStr
+      )
+      const allocated = userLeads.length
+
+      // Unique leads reaching ANY business milestone (counted ONCE per FRD 7.1 & 8)
+      const aggBizLeads = userLeads.filter(
+        l =>
+          hasReachedMilestone(l, 'QUALIFIED BUSINESS') ||
+          hasReachedMilestone(l, 'CONVERTED BUSINESS') ||
+          hasReachedMilestone(l, 'ONBOARDED BUSINESS')
+      )
+      const aggCount = aggBizLeads.length
+      const aggTurnover = aggBizLeads.reduce((s, l) => s + (Number(l.courseFees) || 0), 0)
+      const aggRevenue = aggBizLeads.reduce((s, l) => s + (Number(l.paidAmount) || 0), 0)
+
+      const qLeads = userLeads.filter(l => hasReachedMilestone(l, 'QUALIFIED BUSINESS'))
+      const cLeads = userLeads.filter(l => hasReachedMilestone(l, 'CONVERTED BUSINESS'))
+      const oLeads = userLeads.filter(l => hasReachedMilestone(l, 'ONBOARDED BUSINESS'))
+
+      const sumFees = arr => arr.reduce((s, l) => s + (Number(l.courseFees) || 0), 0)
+      const sumPaid = arr => arr.reduce((s, l) => s + (Number(l.paidAmount) || 0), 0)
+
+      const qTurnover = sumFees(qLeads)
+      const qRevenue = sumPaid(qLeads)
+      const cTurnover = sumFees(cLeads)
+      const cRevenue = sumPaid(cLeads)
+      const oTurnover = sumFees(oLeads)
+      const oRevenue = sumPaid(oLeads)
+
+      kpiTotals.aggregateBusinessCount += aggCount
+      kpiTotals.aggregateTurnover += aggTurnover
+      kpiTotals.aggregateSalesRevenue += aggRevenue
+      kpiTotals.qualifiedCount += qLeads.length
+      kpiTotals.qualifiedTurnover += qTurnover
+      kpiTotals.qualifiedRevenue += qRevenue
+      kpiTotals.convertedCount += cLeads.length
+      kpiTotals.convertedTurnover += cTurnover
+      kpiTotals.convertedRevenue += cRevenue
+      kpiTotals.onboardedCount += oLeads.length
+      kpiTotals.onboardedTurnover += oTurnover
+      kpiTotals.onboardedRevenue += oRevenue
+      kpiTotals.overpaidCount += userLeads.filter(l => l.overpaidFlag).length
+
+      businessReport.push({
+        userId: repIdStr,
+        userName: rep.name,
+        title: rep.title || 'Admissions Counselor',
+        active: rep.active !== false,
+        leadsAllocated: allocated,
+        aggregateCount: aggCount,
+        aggregateTurnover: aggTurnover,
+        aggregateSalesRevenue: aggRevenue,
+        qualifiedCount: qLeads.length,
+        qualifiedTurnover: qTurnover,
+        qualifiedSalesRevenue: qRevenue,
+        convertedCount: cLeads.length,
+        convertedTurnover: cTurnover,
+        convertedSalesRevenue: cRevenue,
+        onboardedCount: oLeads.length,
+        onboardedTurnover: oTurnover,
+        onboardedSalesRevenue: oRevenue,
+      })
+
+      conversionReport.push({
+        userId: repIdStr,
+        userName: rep.name,
+        title: rep.title || 'Admissions Counselor',
+        active: rep.active !== false,
+        leadsAllocated: allocated,
+        aggregateCount: aggCount,
+        aggregateRatio: roundPct(aggCount, allocated),
+        qualifiedCount: qLeads.length,
+        qualifiedRatio: roundPct(qLeads.length, allocated),
+        convertedCount: cLeads.length,
+        convertedRatio: roundPct(cLeads.length, allocated),
+        onboardedCount: oLeads.length,
+        onboardedRatio: roundPct(oLeads.length, allocated),
+      })
+
+      // FRD 7.3 Lead Status Report — strictly Admin-Only (HOT/WARM/COLD hidden from Sales)
+      if (isAdmin) {
+        const countByStatus = st => userLeads.filter(l => (l.leadStatus || 'NEW LEAD') === st).length
+        const hotCount = countByStatus('HOT')
+        const warmCount = countByStatus('WARM')
+        const coldCount = countByStatus('COLD')
+        const lostCount = countByStatus('LOST')
+        const nonConnectCount = countByStatus('NON-CONNECT')
+        const nonProspectCount = countByStatus('NON PROSPECT')
+        const otherCount = Math.max(
+          0,
+          allocated - (hotCount + warmCount + coldCount + lostCount + nonConnectCount + nonProspectCount)
+        )
+
+        statusReport.push({
+          userId: repIdStr,
+          userName: rep.name,
+          title: rep.title || 'Admissions Counselor',
+          active: rep.active !== false,
+          leadsAllocated: allocated,
+          hotCount,
+          hotPct: roundPct(hotCount, allocated),
+          warmCount,
+          warmPct: roundPct(warmCount, allocated),
+          coldCount,
+          coldPct: roundPct(coldCount, allocated),
+          lostCount,
+          lostPct: roundPct(lostCount, allocated),
+          nonConnectCount,
+          nonConnectPct: roundPct(nonConnectCount, allocated),
+          nonProspectCount,
+          nonProspectPct: roundPct(nonProspectCount, allocated),
+          otherCount,
+          otherPct: roundPct(otherCount, allocated),
+        })
+      }
+    }
+
+    // Distinct filter dropdown values from live leads/programs
+    const programSet = new Set()
+    const sourceSet = new Set()
+    rawAssignedLeads.forEach(l => {
+      if (l.businessProgramName) programSet.add(l.businessProgramName)
+      if (l.courseProgram) programSet.add(l.courseProgram)
+      if (l.platform) sourceSet.add(l.platform)
+    })
+
+    res.status(200).json({
+      success: true,
+      meta: {
+        period,
+        dateBasis,
+        milestoneMode,
+        fromDate: startDateObj ? startDateObj.toISOString().slice(0, 10) : '',
+        toDate: endDateObj ? endDateObj.toISOString().slice(0, 10) : '',
+        isAdmin,
+      },
+      kpiTotals: {
+        ...kpiTotals,
+        pendingBalance: Math.max(0, kpiTotals.aggregateTurnover - kpiTotals.aggregateSalesRevenue),
+        aggregateConversionRatio: roundPct(kpiTotals.aggregateBusinessCount, kpiTotals.leadsAllocated),
+      },
+      businessReport,
+      conversionReport,
+      statusReport: isAdmin ? statusReport : undefined,
+      filterOptions: {
+        counselors: allSalesReps.map(r => ({
+          id: r._id.toString(),
+          name: r.name,
+          active: r.active !== false,
+        })),
+        teams: counselorGroups.map(g => ({
+          id: g._id.toString(),
+          name: g.name,
+        })),
+        programs: Array.from(programSet).sort(),
+        sources: Array.from(sourceSet).sort(),
+      },
     })
   } catch (error) {
     res.status(500).json({ success: false, message: error.message })

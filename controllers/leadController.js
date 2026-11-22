@@ -7,6 +7,7 @@ import {
   getOrCreateCrmSettings,
   LEAD_STATUSES,
   BUSINESS_STATUSES,
+  INQUIRY_INTENT_STATUSES,
   deriveHeatTierFromStatus,
 } from '../models/CrmSettings.js'
 import { isLeadAssignedToUser } from '../middleware/authMiddleware.js'
@@ -155,6 +156,8 @@ async function applyLifecycleUpdate(lead, payload, actor, settings) {
     callbackAt,
     incrementCallAttempt,
     lostReason,
+    inquiryIntent,
+    newReceipt,
     businessProgramId,
     businessProgramName,
     businessProgramVariant,
@@ -287,14 +290,37 @@ async function applyLifecycleUpdate(lead, payload, actor, settings) {
     }
   }
 
+  // Validate FRD Section 9: disallow negative Course Fees, Paid Amount, or Receipt Amount
+  if (courseFees !== undefined && courseFees !== '' && courseFees !== null && Number(courseFees) < 0) {
+    return { error: 'Course Fees cannot be negative.', statusCode: 400 }
+  }
+  if (paidAmount !== undefined && paidAmount !== '' && paidAmount !== null && Number(paidAmount) < 0) {
+    return { error: 'Paid Amount cannot be negative.', statusCode: 400 }
+  }
+  if (newReceipt && newReceipt.amount !== undefined && newReceipt.amount !== '' && Number(newReceipt.amount) < 0) {
+    return { error: 'Receipt amount cannot be negative.', statusCode: 400 }
+  }
+
   const nextCourseFees =
     courseFees !== undefined && courseFees !== '' && courseFees !== null
       ? Number(courseFees)
       : lead.courseFees
-  const nextPaidAmount =
+
+  const existingReceipts = Array.isArray(lead.paymentReceipts) ? lead.paymentReceipts : []
+  const existingReceiptSum = existingReceipts.reduce((s, r) => s + (Number(r.amount) || 0), 0)
+  const receiptAmountNum =
+    newReceipt && newReceipt.amount !== undefined && newReceipt.amount !== '' && Number(newReceipt.amount) > 0
+      ? Number(newReceipt.amount)
+      : 0
+
+  let nextPaidAmount =
     paidAmount !== undefined && paidAmount !== '' && paidAmount !== null
       ? Number(paidAmount)
       : lead.paidAmount
+  if (receiptAmountNum > 0) {
+    const basePaid = existingReceipts.length > 0 ? existingReceiptSum : (Number(lead.paidAmount) || 0)
+    nextPaidAmount = basePaid + receiptAmountNum
+  }
 
   if (isBusinessStatus) {
     const bypassAllowed =
@@ -323,6 +349,12 @@ async function applyLifecycleUpdate(lead, payload, actor, settings) {
     }
   }
 
+  const actorInfo = {
+    userId: actor?.id || actor?._id || '',
+    name: actor?.name || author || lead.assignedTo?.repName || 'Staff',
+    role: actor?.role || 'sales',
+  }
+
   // Apply financial values (NEVER clear previously stored financial values when moving backwards)
   if (resolvedProgram) {
     lead.businessProgramId = resolvedProgram._id
@@ -334,9 +366,65 @@ async function applyLifecycleUpdate(lead, payload, actor, settings) {
   if (courseFees !== undefined && courseFees !== '' && courseFees !== null && !Number.isNaN(Number(courseFees))) {
     lead.courseFees = Number(courseFees)
   }
-  if (paidAmount !== undefined && paidAmount !== '' && paidAmount !== null && !Number.isNaN(Number(paidAmount))) {
-    lead.paidAmount = Number(paidAmount)
+
+  // Transaction-level Payment Receipts (FRD Section 8 & 9)
+  lead.paymentReceipts = lead.paymentReceipts || []
+  if (receiptAmountNum > 0) {
+    // If legacy lead had paidAmount without receipts, preserve it as Opening Receipt first
+    if (lead.paymentReceipts.length === 0 && (Number(lead.paidAmount) || 0) > 0) {
+      lead.paymentReceipts.push({
+        amount: Number(lead.paidAmount),
+        receiptDate: lead.updatedAt || new Date(),
+        paymentMode: 'Other',
+        referenceNo: 'PREV-RECORDED',
+        note: 'Previously recorded amount before itemized receipts',
+        recordedBy: { userId: 'system', name: 'System Migration', role: 'system' },
+        createdAt: lead.updatedAt || new Date(),
+      })
+    }
+    lead.paymentReceipts.push({
+      amount: receiptAmountNum,
+      receiptDate: newReceipt.receiptDate ? new Date(newReceipt.receiptDate) : new Date(),
+      paymentMode: newReceipt.paymentMode || 'UPI',
+      referenceNo: String(newReceipt.referenceNo || '').trim(),
+      note: String(newReceipt.note || '').trim(),
+      recordedBy: actorInfo,
+      createdAt: new Date(),
+    })
+    lead.paidAmount = lead.paymentReceipts.reduce((s, r) => s + (Number(r.amount) || 0), 0)
+  } else if (paidAmount !== undefined && paidAmount !== '' && paidAmount !== null && !Number.isNaN(Number(paidAmount))) {
+    const incomingPaid = Number(paidAmount)
+    if (lead.paymentReceipts.length === 0 && incomingPaid > 0) {
+      lead.paymentReceipts.push({
+        amount: incomingPaid,
+        receiptDate: new Date(),
+        paymentMode: newReceipt?.paymentMode || 'UPI',
+        referenceNo: String(newReceipt?.referenceNo || '').trim(),
+        note: String(newReceipt?.note || 'Initial payment recorded').trim(),
+        recordedBy: actorInfo,
+        createdAt: new Date(),
+      })
+    } else if (lead.paymentReceipts.length > 0 && incomingPaid > existingReceiptSum) {
+      lead.paymentReceipts.push({
+        amount: incomingPaid - existingReceiptSum,
+        receiptDate: new Date(),
+        paymentMode: newReceipt?.paymentMode || 'UPI',
+        referenceNo: String(newReceipt?.referenceNo || '').trim(),
+        note: String(newReceipt?.note || 'Additional payment recorded').trim(),
+        recordedBy: actorInfo,
+        createdAt: new Date(),
+      })
+    }
+    lead.paidAmount = incomingPaid
   }
+
+  // Flag Paid Amount exceeding Course Fees for Admin review (FRD Section 9)
+  lead.overpaidFlag = Boolean(
+    lead.courseFees !== null &&
+      lead.courseFees !== undefined &&
+      lead.courseFees > 0 &&
+      (Number(lead.paidAmount) || 0) > Number(lead.courseFees)
+  )
 
   // Audit financial changes if any value changed
   const newFinancial = {
@@ -351,12 +439,6 @@ async function applyLifecycleUpdate(lead, payload, actor, settings) {
     prevFinancial.courseFees !== newFinancial.courseFees ||
     prevFinancial.paidAmount !== newFinancial.paidAmount
 
-  const actorInfo = {
-    userId: actor?.id || actor?._id || '',
-    name: actor?.name || author || lead.assignedTo?.repName || 'Staff',
-    role: actor?.role || 'sales',
-  }
-
   if (financialChanged) {
     lead.financialHistory = lead.financialHistory || []
     lead.financialHistory.unshift({
@@ -367,6 +449,36 @@ async function applyLifecycleUpdate(lead, payload, actor, settings) {
       changedBy: actorInfo,
       changedAt: new Date(),
     })
+  }
+
+  // FRD Section 4: Inquiry Intent Status (Active ONLY for HOT / WARM / COLD; archived in lastInquiryIntent otherwise)
+  const isIntentEligible = ['HOT', 'WARM', 'COLD'].includes(nextStatus)
+  if (isIntentEligible) {
+    if (inquiryIntent !== undefined) {
+      const cleanIntent = String(inquiryIntent || '').trim()
+      if (cleanIntent && !INQUIRY_INTENT_STATUSES.includes(cleanIntent)) {
+        return { error: `Invalid Inquiry Intent Status: "${cleanIntent}"`, statusCode: 400 }
+      }
+      lead.inquiryIntent = cleanIntent
+      if (cleanIntent) {
+        lead.lastInquiryIntent = cleanIntent
+      }
+    }
+  } else {
+    if (lead.inquiryIntent) {
+      lead.lastInquiryIntent = lead.inquiryIntent
+    }
+    lead.inquiryIntent = ''
+  }
+
+  // Record first-reached Milestone History timestamps (FRD Section 7 & 8)
+  lead.milestoneHistory = lead.milestoneHistory || {}
+  if (nextStatus === 'QUALIFIED BUSINESS' && !lead.milestoneHistory.qualifiedAt) {
+    lead.milestoneHistory.qualifiedAt = new Date()
+  } else if (nextStatus === 'CONVERTED BUSINESS' && !lead.milestoneHistory.convertedAt) {
+    lead.milestoneHistory.convertedAt = new Date()
+  } else if (nextStatus === 'ONBOARDED BUSINESS' && !lead.milestoneHistory.onboardedAt) {
+    lead.milestoneHistory.onboardedAt = new Date()
   }
 
   // Update primary lifecycle fields
@@ -488,6 +600,7 @@ async function applyLifecycleUpdate(lead, payload, actor, settings) {
     newStatus: nextStatus,
     selectedCategory: lead.selectedCategory || '',
     selectedCategoryLabel: lead.selectedCategoryLabel || nextStatus,
+    inquiryIntent: lead.inquiryIntent || '',
     heatTier: nextHeatTier,
     note: stepNote || `Updated to ${lead.selectedCategoryLabel || nextStatus}`,
     lostReason: nextStatus === 'LOST' ? lead.lostReason : '',
@@ -1262,6 +1375,123 @@ export const updateLeadStatus = async (req, res) => {
 
 // Alias endpoint specifically for step-by-step updates
 export const addLeadStep = updateLeadStatus
+
+// -------------------------------------------------------------
+// POST /api/leads/:id/receipts (Add Installment Payment Receipt — auto-sums Paid Amount)
+// -------------------------------------------------------------
+export const addLeadPaymentReceipt = async (req, res) => {
+  try {
+    const { id } = req.params
+    const { amount, receiptDate, paymentMode = 'UPI', referenceNo = '', note = '' } = req.body || {}
+
+    const amtNum = Number(amount)
+    if (Number.isNaN(amtNum) || amtNum <= 0) {
+      return res.status(400).json({ success: false, message: 'Receipt amount must be greater than 0.' })
+    }
+
+    const lead = await Lead.findById(id)
+    if (!lead) {
+      return res.status(404).json({ success: false, message: 'Lead not found' })
+    }
+
+    const actor = req.user || null
+    const isAdmin = actor?.role === 'admin'
+    if (actor && !isAdmin && !isLeadAssignedToUser(lead, actor)) {
+      return res.status(403).json({
+        success: false,
+        message: 'You can only record payment receipts for leads assigned to you.',
+      })
+    }
+
+    const settings = await getOrCreateCrmSettings()
+    if (!isAdmin && !settings.allowSalesFinancialEdit) {
+      return res.status(403).json({
+        success: false,
+        message: 'Financial receipt editing is restricted to Administrators.',
+      })
+    }
+
+    const prevFinancial = {
+      businessProgramName: lead.businessProgramName || '',
+      businessProgramVariant: lead.businessProgramVariant || '',
+      courseFees: lead.courseFees ?? null,
+      paidAmount: lead.paidAmount ?? null,
+    }
+
+    const actorInfo = {
+      userId: actor?.id || actor?._id || '',
+      name: actor?.name || 'Staff',
+      role: actor?.role || 'sales',
+    }
+
+    lead.paymentReceipts = lead.paymentReceipts || []
+    if (lead.paymentReceipts.length === 0 && (Number(lead.paidAmount) || 0) > 0) {
+      lead.paymentReceipts.push({
+        amount: Number(lead.paidAmount),
+        receiptDate: lead.updatedAt || new Date(),
+        paymentMode: 'Other',
+        referenceNo: 'PREV-RECORDED',
+        note: 'Previously recorded amount before itemized receipts',
+        recordedBy: { userId: 'system', name: 'System Migration', role: 'system' },
+        createdAt: lead.updatedAt || new Date(),
+      })
+    }
+
+    const receiptEntry = {
+      amount: amtNum,
+      receiptDate: receiptDate ? new Date(receiptDate) : new Date(),
+      paymentMode: paymentMode || 'UPI',
+      referenceNo: String(referenceNo || '').trim(),
+      note: String(note || '').trim(),
+      recordedBy: actorInfo,
+      createdAt: new Date(),
+    }
+    lead.paymentReceipts.push(receiptEntry)
+    lead.paidAmount = lead.paymentReceipts.reduce((s, r) => s + (Number(r.amount) || 0), 0)
+    lead.overpaidFlag = Boolean(
+      lead.courseFees !== null &&
+        lead.courseFees !== undefined &&
+        lead.courseFees > 0 &&
+        lead.paidAmount > Number(lead.courseFees)
+    )
+
+    lead.financialHistory = lead.financialHistory || []
+    lead.financialHistory.unshift({
+      previousValues: prevFinancial,
+      newValues: {
+        businessProgramName: lead.businessProgramName || '',
+        businessProgramVariant: lead.businessProgramVariant || '',
+        courseFees: lead.courseFees ?? null,
+        paidAmount: lead.paidAmount,
+      },
+      leadStatus: lead.leadStatus || 'NEW LEAD',
+      note: `Receipt ₹${amtNum.toLocaleString('en-IN')} (${receiptEntry.paymentMode}${receiptEntry.referenceNo ? ` • Ref: ${receiptEntry.referenceNo}` : ''})${receiptEntry.note ? ` — ${receiptEntry.note}` : ''}`,
+      changedBy: actorInfo,
+      changedAt: new Date(),
+    })
+
+    lead.notes = lead.notes || []
+    lead.notes.unshift({
+      text: `Payment receipt recorded: ₹${amtNum.toLocaleString('en-IN')} via ${receiptEntry.paymentMode}${receiptEntry.referenceNo ? ` (Ref: ${receiptEntry.referenceNo})` : ''}. Total Paid: ₹${lead.paidAmount.toLocaleString('en-IN')}.`,
+      author: actorInfo.name,
+      status: lead.status,
+      subStatus: lead.subStatus,
+      timestamp: new Date(),
+    })
+
+    await lead.save()
+    const callerRole = actor?.role || 'sales'
+    res.status(200).json({
+      success: true,
+      message: lead.overpaidFlag
+        ? `Receipt ₹${amtNum.toLocaleString('en-IN')} saved. Note: Total paid exceeds Course Fees (flagged for review).`
+        : `Payment receipt of ₹${amtNum.toLocaleString('en-IN')} recorded. Total Paid: ₹${lead.paidAmount.toLocaleString('en-IN')}.`,
+      lead: sanitizeLeadForRole(lead, callerRole),
+    })
+  } catch (error) {
+    res.status(500).json({ success: false, message: error.message })
+  }
+}
 
 // -------------------------------------------------------------
 // POST /api/leads/:id/recycle (Admin-only: Recycle a single LOST lead)

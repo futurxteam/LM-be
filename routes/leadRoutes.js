@@ -10,6 +10,7 @@ import {
   unassignLeads,
   updateLeadStatus,
   addLeadStep,
+  addLeadPaymentReceipt,
   recycleLead,
   bulkRecycleLeads,
   updateLeadProfile,
@@ -63,6 +64,7 @@ router.post('/unassign', unassignLeads)
 router.post('/bulk-delete', requireAdmin, bulkDeleteLeads)
 router.post('/bulk-recycle', requireAdmin, bulkRecycleLeads)
 router.post('/:id/steps', addLeadStep)
+router.post('/:id/receipts', addLeadPaymentReceipt)
 router.post('/:id/recycle', requireAdmin, recycleLead)
 router.patch('/:id/status', updateLeadStatus)
 router.put('/:id/profile', updateLeadProfile)

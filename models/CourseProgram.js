@@ -6,6 +6,7 @@ const courseProgramSchema = new mongoose.Schema(
     code: { type: String, trim: true, default: '' },
     variants: { type: [String], default: [] },
     defaultFee: { type: Number, default: 0, min: 0 },
+    variantFees: { type: mongoose.Schema.Types.Mixed, default: {} },
     active: { type: Boolean, default: true, index: true },
   },
   { timestamps: true }

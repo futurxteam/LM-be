@@ -1,5 +1,10 @@
 import CourseProgram, { ensureDefaultPrograms } from '../models/CourseProgram.js'
-import { getOrCreateCrmSettings, LEAD_STATUSES, deriveHeatTierFromStatus } from '../models/CrmSettings.js'
+import {
+  getOrCreateCrmSettings,
+  LEAD_STATUSES,
+  INQUIRY_INTENT_STATUSES,
+  deriveHeatTierFromStatus,
+} from '../models/CrmSettings.js'
 
 // -------------------------------------------------------------
 // GET /api/crm/meta - Shared lifecycle options for Admin & Sales
@@ -31,6 +36,7 @@ export const getCrmMeta = async (req, res) => {
       allPrograms: isAdmin ? programs : undefined,
       outcomeCategories: sanitizedCategories,
       lostReasons: settings.lostReasons || [],
+      inquiryIntentStatuses: INQUIRY_INTENT_STATUSES,
       leadStatuses: LEAD_STATUSES,
       policy: {
         requireBusinessFields: settings.requireBusinessFields,
@@ -160,7 +166,7 @@ export const getCoursePrograms = async (req, res) => {
 // -------------------------------------------------------------
 export const createCourseProgram = async (req, res) => {
   try {
-    const { name, code, variants, defaultFee, active } = req.body || {}
+    const { name, code, variants, defaultFee, variantFees, active } = req.body || {}
     if (!name || !String(name).trim()) {
       return res.status(400).json({ success: false, message: 'Program name is required.' })
     }
@@ -177,11 +183,22 @@ export const createCourseProgram = async (req, res) => {
       ? variants.split(',').map(v => v.trim()).filter(Boolean)
       : []
 
+    const cleanVariantFees = {}
+    if (variantFees && typeof variantFees === 'object') {
+      for (const v of cleanVariants) {
+        const feeNum = Number(variantFees[v])
+        if (!Number.isNaN(feeNum) && feeNum >= 0) {
+          cleanVariantFees[v] = feeNum
+        }
+      }
+    }
+
     const program = await CourseProgram.create({
       name: cleanName,
       code: String(code || '').trim().toUpperCase(),
       variants: cleanVariants,
       defaultFee: Number(defaultFee) >= 0 ? Number(defaultFee) : 0,
+      variantFees: cleanVariantFees,
       active: active !== false,
     })
 
@@ -206,7 +223,7 @@ export const updateCourseProgram = async (req, res) => {
       return res.status(404).json({ success: false, message: 'Course program not found.' })
     }
 
-    const { name, code, variants, defaultFee, active } = req.body || {}
+    const { name, code, variants, defaultFee, variantFees, active } = req.body || {}
     if (name !== undefined && String(name).trim()) program.name = String(name).trim()
     if (code !== undefined) program.code = String(code).trim().toUpperCase()
     if (variants !== undefined) {
@@ -218,6 +235,18 @@ export const updateCourseProgram = async (req, res) => {
     }
     if (defaultFee !== undefined) {
       program.defaultFee = Number(defaultFee) >= 0 ? Number(defaultFee) : 0
+    }
+    if (variantFees !== undefined && typeof variantFees === 'object') {
+      const cleanVariantFees = {}
+      const validVariants = program.variants || []
+      for (const v of validVariants) {
+        const feeNum = Number(variantFees[v])
+        if (variantFees[v] !== '' && variantFees[v] !== null && variantFees[v] !== undefined && !Number.isNaN(feeNum) && feeNum >= 0) {
+          cleanVariantFees[v] = feeNum
+        }
+      }
+      program.variantFees = cleanVariantFees
+      program.markModified('variantFees')
     }
     if (active !== undefined) program.active = Boolean(active)
 

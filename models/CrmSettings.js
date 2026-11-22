@@ -19,6 +19,16 @@ export const BUSINESS_STATUSES = [
   'ONBOARDED BUSINESS',
 ]
 
+export const INQUIRY_INTENT_STATUSES = [
+  'Just Exploring & Searching',
+  'Comparing Program & Price',
+  'Parent/Guardian Discussion',
+  'Confused / Discussion Pending',
+  'Counselling Requested',
+  'Counselling Completed',
+  'Ready to Enroll',
+]
+
 export const DEFAULT_OUTCOME_CATEGORIES = [
   // Positive interest -> HOT
   { key: 'ready_to_join', label: 'Ready to Join / High Intent', leadStatus: 'HOT', heatTier: 'HOT', group: 'Positive Interest', active: true },
@@ -60,14 +70,17 @@ export const DEFAULT_OUTCOME_CATEGORIES = [
 ]
 
 export const DEFAULT_LOST_REASONS = [
-  'Fee / Budget Issue',
-  'Joined Another Institute',
-  'Location / Relocation Constraint',
-  'Postponed Plans Indefinitely',
-  'No Longer Interested',
-  'Family / Personal Reason',
-  'Other',
+  'Fee / Financial Constraint',
+  'Joined Another Institution',
+  'Selected Another Course',
+  'Not Interested in Healthcare',
+  'Parent/Guardian Not Interested',
+  'Employment Commitment',
+  'Not for Now, Will Do Later',
+  'Trust / Credibility Concern',
 ]
+
+const LEGACY_LOST_REASONS_SIGNATURE = 'Fee / Budget Issue'
 
 const outcomeCategorySchema = new mongoose.Schema(
   {
@@ -115,6 +128,14 @@ export async function getOrCreateCrmSettings() {
       outcomeCategories: DEFAULT_OUTCOME_CATEGORIES,
       lostReasons: DEFAULT_LOST_REASONS,
     })
+  } else if (
+    Array.isArray(settings.lostReasons) &&
+    settings.lostReasons.includes(LEGACY_LOST_REASONS_SIGNATURE) &&
+    !settings.lostReasons.includes('Fee / Financial Constraint')
+  ) {
+    // Auto-upgrade legacy default Lost Reasons to the 8 standardized FRD v1.0 values
+    settings.lostReasons = [...DEFAULT_LOST_REASONS]
+    await settings.save()
   }
   return settings
 }

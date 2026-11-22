@@ -20,6 +20,7 @@ const stepSchema = new mongoose.Schema(
     newStatus: { type: String, required: true },
     selectedCategory: { type: String, default: '' },
     selectedCategoryLabel: { type: String, default: '' },
+    inquiryIntent: { type: String, default: '' },
     heatTier: { type: String, enum: ['HOT', 'WARM', 'COLD', null], default: null },
     note: { type: String, default: '' },
     lostReason: { type: String, default: '' },
@@ -63,6 +64,44 @@ const financialAuditSchema = new mongoose.Schema(
       role: { type: String, default: 'system' },
     },
     changedAt: { type: Date, default: Date.now },
+  },
+  { _id: false }
+)
+
+const paymentReceiptSchema = new mongoose.Schema(
+  {
+    amount: { type: Number, required: true, min: 0 },
+    receiptDate: { type: Date, default: Date.now },
+    paymentMode: {
+      type: String,
+      enum: ['UPI', 'Bank Transfer / NEFT', 'Cash', 'Card', 'Cheque', 'Online Gateway', 'Other'],
+      default: 'UPI',
+    },
+    referenceNo: { type: String, trim: true, default: '' },
+    note: { type: String, trim: true, default: '' },
+    recordedBy: {
+      userId: { type: String, default: '' },
+      name: { type: String, default: 'System' },
+      role: { type: String, default: 'system' },
+    },
+    createdAt: { type: Date, default: Date.now },
+  },
+  { _id: true }
+)
+
+const ownershipHistorySchema = new mongoose.Schema(
+  {
+    fromRepId: { type: mongoose.Schema.Types.Mixed, default: null },
+    fromRepName: { type: String, default: '' },
+    toRepId: { type: mongoose.Schema.Types.Mixed, default: null },
+    toRepName: { type: String, default: '' },
+    reason: { type: String, default: '' },
+    changedBy: {
+      userId: { type: String, default: '' },
+      name: { type: String, default: 'System' },
+      role: { type: String, default: 'system' },
+    },
+    timestamp: { type: Date, default: Date.now },
   },
   { _id: false }
 )
@@ -129,6 +168,9 @@ const leadSchema = new mongoose.Schema(
     },
     selectedCategory: { type: String, default: '' },
     selectedCategoryLabel: { type: String, default: '' },
+    // FRD Section 4: Active Inquiry Intent Status (only active for HOT / WARM / COLD; archived in lastInquiryIntent otherwise)
+    inquiryIntent: { type: String, default: '' },
+    lastInquiryIntent: { type: String, default: '' },
     // Admin-only heat classification derived from category/status
     heatTier: {
       type: String,
@@ -173,8 +215,15 @@ const leadSchema = new mongoose.Schema(
     },
     businessProgramName: { type: String, default: '' },
     businessProgramVariant: { type: String, default: '' },
-    courseFees: { type: Number, default: null },
-    paidAmount: { type: Number, default: null },
+    courseFees: { type: Number, default: null, min: 0 },
+    paidAmount: { type: Number, default: null, min: 0 },
+    overpaidFlag: { type: Boolean, default: false },
+    paymentReceipts: [paymentReceiptSchema],
+    milestoneHistory: {
+      qualifiedAt: { type: Date, default: null },
+      convertedAt: { type: Date, default: null },
+      onboardedAt: { type: Date, default: null },
+    },
 
     // Lifecycle Completion / Dropped Tracking (used by capacity-aware allocation)
     isDropped: { type: Boolean, default: false, index: true },
@@ -182,9 +231,10 @@ const leadSchema = new mongoose.Schema(
     droppedReason: { type: String, default: '' },
     completedAt: { type: Date, default: null },
 
-    // Step-by-Step Progression, Financial Audit & Notes
+    // Step-by-Step Progression, Financial Audit, Ownership Audit & Notes
     steps: [stepSchema],
     financialHistory: [financialAuditSchema],
+    ownershipHistory: [ownershipHistorySchema],
     notes: [noteSchema],
   },
   { timestamps: true }
