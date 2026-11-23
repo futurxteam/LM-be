@@ -17,7 +17,7 @@ export async function attachUser(req, res, next) {
       return next()
     }
 
-    const sessionMatch = token.match(/^jwt_(admin|sales)_session_(.+)$/)
+    const sessionMatch = token.match(/^jwt_(admin|sales|manager)_session_(.+)$/)
     if (sessionMatch) {
       const [, roleFromToken, userId] = sessionMatch
       if (mongoose.Types.ObjectId.isValid(userId)) {
@@ -39,6 +39,8 @@ export async function attachUser(req, res, next) {
             role: userDoc.role,
             title: userDoc.title,
             active: userDoc.active !== false,
+            groupId: userDoc.groupId ? userDoc.groupId.toString() : null,
+            isGroupManager: Boolean(userDoc.isGroupManager),
           }
           return next()
         }

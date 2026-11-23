@@ -2072,15 +2072,53 @@ export const createLead = async (req, res) => {
       return res.status(400).json({ success: false, message: 'Name is required' })
     }
 
-    // Determine Assignment:
-    // If explicitly set to 'pool', keep UNASSIGNED.
-    // If specific counselor passed, assign directly.
-    // Default: Run capacity-aware round-robin to assign directly to counselor's personal queue!
+    // Determine Assignment based on role:
+    // - Sales advisor: strictly assigned to themselves (their own lead)
+    // - Manager: can assign to themselves or members in their team
+    // - Admin / Public: respects assignMode, specific counselor, or round-robin
     let leadAssignmentStatus = 'UNASSIGNED'
     let leadAssignedTo = null
     let leadGroupId = groupId || null
 
-    if (assignMode === 'pool') {
+    const isCallerAdmin = req.user?.role === 'admin'
+    const isCallerManager = Boolean(req.user?.isGroupManager) || req.user?.role === 'manager'
+    const isCallerSales = Boolean(req.user) && !isCallerAdmin && !isCallerManager
+
+    if (isCallerSales) {
+      // Standard sales rep can strictly ONLY create leads assigned to themselves
+      leadAssignmentStatus = 'ASSIGNED'
+      leadAssignedTo = {
+        repId: req.user._id || req.user.id,
+        repName: req.user.name,
+        repRole: req.user.title || 'Admissions Counselor',
+        assignedAt: new Date(),
+      }
+      leadGroupId = req.user.groupId || null
+    } else if (isCallerManager) {
+      // Manager can assign to themselves OR a member in their team/group
+      if (assignedTo && (assignedTo.repId || assignedTo.id)) {
+        const repId = assignedTo.repId || assignedTo.id
+        const counselor = await User.findById(repId)
+        leadAssignmentStatus = 'ASSIGNED'
+        leadAssignedTo = {
+          repId: counselor ? counselor._id : repId,
+          repName: counselor ? counselor.name : assignedTo.repName || 'Admissions Counselor',
+          repRole: counselor ? (counselor.title || 'Admissions Counselor') : 'Admissions Counselor',
+          assignedAt: new Date(),
+        }
+        leadGroupId = counselor?.groupId || req.user.groupId || groupId || null
+      } else {
+        // Defaults to manager themselves
+        leadAssignmentStatus = 'ASSIGNED'
+        leadAssignedTo = {
+          repId: req.user._id || req.user.id,
+          repName: req.user.name,
+          repRole: req.user.title || 'Team Manager',
+          assignedAt: new Date(),
+        }
+        leadGroupId = req.user.groupId || null
+      }
+    } else if (assignMode === 'pool') {
       leadAssignmentStatus = 'UNASSIGNED'
       leadAssignedTo = null
       leadGroupId = null
