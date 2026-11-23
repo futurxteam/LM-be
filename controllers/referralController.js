@@ -7,29 +7,34 @@ function getDateRangeFilter(dateFilter, startDate, endDate) {
   let from = null
   let to = null
 
-  if (dateFilter === 'today') {
-    from = new Date(now.getFullYear(), now.getMonth(), now.getDate())
-    to = new Date(now.getFullYear(), now.getMonth(), now.getDate(), 23, 59, 59, 999)
-  } else if (dateFilter === 'this_month') {
-    from = new Date(now.getFullYear(), now.getMonth(), 1)
-    to = new Date(now.getFullYear(), now.getMonth() + 1, 0, 23, 59, 59, 999)
-  } else if (dateFilter === 'last_month') {
-    from = new Date(now.getFullYear(), now.getMonth() - 1, 1)
-    to = new Date(now.getFullYear(), now.getMonth(), 0, 23, 59, 59, 999)
-  } else if (dateFilter === 'this_year') {
-    from = new Date(now.getFullYear(), 0, 1)
-    to = new Date(now.getFullYear(), 11, 31, 23, 59, 59, 999)
-  } else if (dateFilter === 'custom' || startDate || endDate) {
+  if (startDate || endDate) {
     if (startDate) from = new Date(startDate)
     if (endDate) {
       to = new Date(endDate)
       to.setHours(23, 59, 59, 999)
     }
+  } else if (dateFilter === 'today') {
+    from = new Date(now.getFullYear(), now.getMonth(), now.getDate())
+    to = new Date(now.getFullYear(), now.getMonth(), now.getDate(), 23, 59, 59, 999)
+  } else if (dateFilter === 'week' || dateFilter === 'this_week') {
+    const dayOfWeek = now.getDay()
+    const diffToMonday = (dayOfWeek + 6) % 7
+    from = new Date(now.getFullYear(), now.getMonth(), now.getDate() - diffToMonday)
+    to = new Date(now.getFullYear(), now.getMonth(), now.getDate(), 23, 59, 59, 999)
+  } else if (dateFilter === 'month' || dateFilter === 'this_month') {
+    from = new Date(now.getFullYear(), now.getMonth(), 1)
+    to = new Date(now.getFullYear(), now.getMonth() + 1, 0, 23, 59, 59, 999)
+  } else if (dateFilter === 'last_month') {
+    from = new Date(now.getFullYear(), now.getMonth() - 1, 1)
+    to = new Date(now.getFullYear(), now.getMonth(), 0, 23, 59, 59, 999)
+  } else if (dateFilter === 'year' || dateFilter === 'this_year') {
+    from = new Date(now.getFullYear(), 0, 1)
+    to = new Date(now.getFullYear(), 11, 31, 23, 59, 59, 999)
   }
 
   const range = {}
-  if (from) range.$gte = from
-  if (to) range.$lte = to
+  if (from && !isNaN(from.getTime())) range.$gte = from
+  if (to && !isNaN(to.getTime())) range.$lte = to
   return Object.keys(range).length > 0 ? range : null
 }
 
@@ -272,20 +277,43 @@ export const getReferralStats = async (req, res) => {
       success: true,
       stats: {
         totalCount,
+        totalReferrals: totalCount,
         convertedCount,
         onboardedCount,
         qualifiedCount,
         conversionRate,
         totalRevenue,
-        byType: {
-          lead: { ...byType.lead, conversionRate: byType.lead.count > 0 ? Math.round((byType.lead.converted / byType.lead.count) * 100) : 0 },
-          student: { ...byType.student, conversionRate: byType.student.count > 0 ? Math.round((byType.student.converted / byType.student.count) * 100) : 0 },
-          alumni: { ...byType.alumni, conversionRate: byType.alumni.count > 0 ? Math.round((byType.alumni.converted / byType.alumni.count) * 100) : 0 },
+        kpis: {
+          totalReferrals: totalCount,
+          qualified: qualifiedCount,
+          converted: convertedCount,
+          onboarded: onboardedCount,
+          conversionRate,
+          totalRevenue,
         },
-        leaderboard,
-        monthlyTrend,
+        demographics: {
+          byType: {
+            lead: byType.lead.count,
+            student: byType.student.count,
+            alumni: byType.alumni.count,
+          },
+          byCourse: courseBreakdown,
+          byBatch: batchBreakdown,
+        },
+        byType: {
+          lead: byType.lead.count,
+          student: byType.student.count,
+          alumni: byType.alumni.count,
+          details: {
+            lead: { ...byType.lead, conversionRate: byType.lead.count > 0 ? Math.round((byType.lead.converted / byType.lead.count) * 100) : 0 },
+            student: { ...byType.student, conversionRate: byType.student.count > 0 ? Math.round((byType.student.converted / byType.student.count) * 100) : 0 },
+            alumni: { ...byType.alumni, conversionRate: byType.alumni.count > 0 ? Math.round((byType.alumni.converted / byType.alumni.count) * 100) : 0 },
+          },
+        },
         courseBreakdown,
         batchBreakdown,
+        leaderboard,
+        monthlyTrend,
       },
     })
   } catch (error) {
