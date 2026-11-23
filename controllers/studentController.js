@@ -6,8 +6,8 @@ function sanitizePhone(phone) {
 }
 
 // LMS API Configuration (Strictly via HTTP API with permanent access key)
-const FA_API_KEY = process.env.FA_LMS_API_KEY
-const FA_API_URL = process.env.FA_LMS_API_URL
+const FA_API_KEY = process.env.FA_LMS_API_KEY || 'fa_sec_live_9b4e7a2f1c8d5e0a3b6c9d2e4f7a1b8c'
+const FA_API_URL = process.env.FA_LMS_API_URL || 'https://fa-backend-wont.onrender.com/api/external/students/search'
 // -------------------------------------------------------------
 // GET /api/students/lms-search
 // 1. Searches local CRM Student DB first
