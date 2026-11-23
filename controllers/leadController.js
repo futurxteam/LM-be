@@ -359,25 +359,35 @@ async function applyLifecycleUpdate(lead, payload, actor, settings) {
     if (nextStatus === 'CONVERTED BUSINESS' && !bypassAllowed) {
       if (nextPaidAmount === null || nextPaidAmount === undefined || Number(nextPaidAmount) < 10000) {
         return {
-          error: 'Converted Business requires a minimum payment of ₹10,000. For token or booking payments below ₹10,000, please select Qualified.',
+          error: "Can't update step: Total amount is not ₹10,000 or above for Converted Business. For token or advance payments below ₹10,000, please select Qualified.",
           statusCode: 400,
         }
       }
     }
 
-    // 2. ONBOARDED BUSINESS can ONLY be reached from CONVERTED BUSINESS
+    // 2. QUALIFIED BUSINESS is strictly for advance/token payments below ₹10,000
+    if (nextStatus === 'QUALIFIED BUSINESS' && !bypassAllowed) {
+      if (nextPaidAmount !== null && nextPaidAmount !== undefined && Number(nextPaidAmount) >= 10000) {
+        return {
+          error: "Can't update step: Total amount is ₹10,000 or above. Qualified Business is strictly for token/advance payments below ₹10,000. Please select Converted Business.",
+          statusCode: 400,
+        }
+      }
+    }
+
+    // 3. ONBOARDED BUSINESS can ONLY be reached from CONVERTED BUSINESS
     if (nextStatus === 'ONBOARDED BUSINESS' && !bypassAllowed) {
       const isCurrentlyConverted =
         prevStatus === 'CONVERTED BUSINESS' || Boolean(lead.milestoneHistory?.convertedAt)
       if (!isCurrentlyConverted) {
         return {
-          error: 'A lead must first be in Converted Business state (with at least ₹10,000 paid) before it can be Onboarded.',
+          error: "Can't update step: A lead must first be in Converted Business state (with at least ₹10,000 paid) before it can be Onboarded.",
           statusCode: 400,
         }
       }
       if (nextPaidAmount === null || nextPaidAmount === undefined || Number(nextPaidAmount) < 10000) {
         return {
-          error: 'Onboarded Business requires at least ₹10,000 collected.',
+          error: "Can't update step: Onboarded Business requires at least ₹10,000 collected.",
           statusCode: 400,
         }
       }
