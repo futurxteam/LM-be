@@ -8,115 +8,138 @@ function sanitizePhone(phone) {
 // LMS API Configuration (Strictly via HTTP API with permanent access key)
 const FA_API_KEY = process.env.FA_LMS_API_KEY
 const FA_API_URL = process.env.FA_LMS_API_URL
-
 // -------------------------------------------------------------
-// GET /api/students/lms-search - Live Search Verified LMS Students & Alumni
-// Strictly queries fa-backend REST API
+// GET /api/students/lms-search
+// 1. Searches local CRM Student DB first
+// 2. If not found in local DB, queries fa-backend LMS HTTP API
+// 3. Strictly READ-ONLY during search (Zero DB writes on search!)
 // -------------------------------------------------------------
 export const searchLmsStudents = async (req, res) => {
   try {
     const { query = '', type = 'all', limit = 20 } = req.query
+    const maxResults = Math.min(Math.max(parseInt(limit, 10) || 20, 1), 50)
+    const cleanQuery = String(query || '').trim()
+    const cleanP = sanitizePhone(cleanQuery)
 
-    const url = `${FA_API_URL}?query=${encodeURIComponent(query)}&type=${encodeURIComponent(type)}&limit=${limit}`
+    // 1. Search local CRM Student DB first
+    const localFilter = {}
+    if (type === 'alumni') {
+      localFilter.$or = [{ isAlumni: true }, { status: 'alumni' }, { status: 'completed' }]
+    } else if (type === 'student') {
+      localFilter.isAlumni = { $ne: true }
+    }
 
-    const response = await fetch(url, {
-      method: 'GET',
-      headers: {
-        'x-api-key': FA_API_KEY,
-        'Content-Type': 'application/json',
-      },
-    })
+    if (cleanQuery) {
+      const escaped = cleanQuery.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+      const regex = new RegExp(escaped, 'i')
+      const searchFields = [
+        { name: regex },
+        { email: regex },
+        { course: regex },
+        { batch: regex },
+        { studentId: regex },
+      ]
+      if (cleanP && cleanP.length >= 3) {
+        searchFields.push({ phone: new RegExp(cleanP, 'i') })
+      }
 
-    if (!response.ok) {
-      const errText = await response.text()
-      console.error('[searchLmsStudents] fa-backend API error:', response.status, errText)
-      return res.status(response.status).json({
-        success: false,
-        message: `LMS API responded with status ${response.status}`,
-        error: errText,
+      if (localFilter.$or) {
+        localFilter.$and = [{ $or: localFilter.$or }, { $or: searchFields }]
+        delete localFilter.$or
+      } else {
+        localFilter.$or = searchFields
+      }
+    }
+
+    const localStudents = await Student.find(localFilter).limit(maxResults).lean()
+
+    const formattedLocal = localStudents.map(s => ({
+      id: s._id.toString(),
+      lmsUserId: s.lmsUserId || '',
+      name: s.name,
+      phone: s.phone,
+      email: s.email || '',
+      course: s.course || '',
+      batch: s.batch || '',
+      rollNo: s.studentId || '',
+      isAlumni: Boolean(s.isAlumni),
+      status: s.status,
+      isVerifiedLms: Boolean(s.isVerifiedLms),
+      source: 'local',
+    }))
+
+    // If local results satisfy the limit, return them immediately
+    if (formattedLocal.length >= maxResults) {
+      return res.status(200).json({
+        success: true,
+        count: formattedLocal.length,
+        data: formattedLocal,
       })
     }
 
-    const json = await response.json()
-    const lmsData = Array.isArray(json.data) ? json.data : []
+    // 2. If not found or fewer than limit, search LMS via fa-backend REST API
+    let lmsFormatted = []
+    try {
+      const remainingLimit = maxResults - formattedLocal.length
+      const url = `${FA_API_URL}?query=${encodeURIComponent(cleanQuery)}&type=${encodeURIComponent(type)}&limit=${remainingLimit}`
 
-    // Ensure matched LMS students exist in local CRM Student collection for clean local relations
-    const verifiedStudents = await Promise.all(
-      lmsData.map(async item => {
-        const cleanP = sanitizePhone(item.phone)
-        let localStudent = null
-        if (item.lmsUserId) {
-          localStudent = await Student.findOne({ lmsUserId: item.lmsUserId })
-        }
-        if (!localStudent && cleanP) {
-          localStudent = await Student.findOne({ phone: cleanP })
-        }
+      const response = await fetch(url, {
+        method: 'GET',
+        headers: {
+          'x-api-key': FA_API_KEY,
+          'Content-Type': 'application/json',
+        },
+      })
 
-        if (!localStudent) {
-          localStudent = new Student({
+      if (response.ok) {
+        const json = await response.json()
+        const lmsData = Array.isArray(json.data) ? json.data : []
+
+        // Avoid duplicates already in formattedLocal
+        const existingPhones = new Set(formattedLocal.map(s => sanitizePhone(s.phone)).filter(Boolean))
+        const existingLmsIds = new Set(formattedLocal.map(s => s.lmsUserId).filter(Boolean))
+
+        lmsFormatted = lmsData
+          .filter(item => {
+            const p = sanitizePhone(item.phone)
+            if (p && existingPhones.has(p)) return false
+            if (item.lmsUserId && existingLmsIds.has(item.lmsUserId)) return false
+            return true
+          })
+          .map(item => ({
+            id: null, // Indicates not yet registered locally in CRM Student DB
+            lmsUserId: item.lmsUserId || '',
             name: item.name,
-            phone: cleanP || item.phone,
+            phone: item.phone,
             email: item.email || '',
             course: item.courseName || '',
             batch: item.batchName || '',
+            rollNo: item.rollNo || '',
             isAlumni: Boolean(item.isAlumni),
-            status: item.isAlumni ? 'alumni' : (item.status || 'active'),
-            studentId: item.rollNo || '',
-            lmsUserId: item.lmsUserId || '',
+            status: item.status,
             isVerifiedLms: true,
-          })
-          await localStudent.save()
-        } else {
-          let updated = false
-          if (!localStudent.lmsUserId && item.lmsUserId) {
-            localStudent.lmsUserId = item.lmsUserId
-            updated = true
-          }
-          if (item.courseName && !localStudent.course) {
-            localStudent.course = item.courseName
-            updated = true
-          }
-          if (item.batchName && !localStudent.batch) {
-            localStudent.batch = item.batchName
-            updated = true
-          }
-          if (item.isAlumni !== undefined && localStudent.isAlumni !== item.isAlumni) {
-            localStudent.isAlumni = item.isAlumni
-            updated = true
-          }
-          if (!localStudent.isVerifiedLms) {
-            localStudent.isVerifiedLms = true
-            updated = true
-          }
-          if (updated) await localStudent.save()
-        }
+            source: 'lms',
+          }))
+      } else {
+        console.warn(`[searchLmsStudents] LMS API returned ${response.status}`)
+      }
+    } catch (lmsErr) {
+      console.warn('⚠️ Could not query LMS API:', lmsErr.message)
+    }
 
-        return {
-          id: localStudent._id.toString(),
-          lmsUserId: item.lmsUserId,
-          name: localStudent.name || item.name,
-          phone: localStudent.phone || item.phone,
-          email: localStudent.email || item.email,
-          course: localStudent.course || item.courseName,
-          batch: localStudent.batch || item.batchName,
-          rollNo: item.rollNo || localStudent.studentId,
-          isAlumni: Boolean(item.isAlumni),
-          status: item.status,
-          isVerifiedLms: true,
-        }
-      })
-    )
+    // Combine local results + LMS results (strictly READ-ONLY, 0 database writes)
+    const combined = [...formattedLocal, ...lmsFormatted].slice(0, maxResults)
 
     res.status(200).json({
       success: true,
-      count: verifiedStudents.length,
-      data: verifiedStudents,
+      count: combined.length,
+      data: combined,
     })
   } catch (error) {
-    console.error('[searchLmsStudents] Network/Fetch Error:', error)
+    console.error('[searchLmsStudents] Error:', error)
     res.status(500).json({
       success: false,
-      message: 'Failed to communicate with LMS backend API',
+      message: 'Failed to search students',
       error: error.message,
     })
   }

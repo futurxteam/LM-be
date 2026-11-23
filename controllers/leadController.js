@@ -2151,7 +2151,7 @@ export const createLead = async (req, res) => {
       referral: referralData && referralData.hasReferral
         ? {
             isReferred: true,
-            referralType: referralData.referralType,
+            referralType: referralData.referralType || referralData.referrerType || (referralData.isAlumni ? 'alumni' : 'student'),
             referrerName: referralData.referrerName || '',
             referrerPhone: referralData.referrerPhone || '',
             referrerCourse: referralData.referrerCourse || '',
@@ -2162,19 +2162,65 @@ export const createLead = async (req, res) => {
 
     const saved = await newLead.save()
 
+    // When lead is saved with a referral, register student in Student DB (if LMS) and save Referral doc
     if (referralData && referralData.hasReferral) {
       try {
+        const resolvedRefType = referralData.referralType || referralData.referrerType || (referralData.isAlumni ? 'alumni' : 'student')
+        let linkedStudentId = referralData.referrerStudentId || null
+
+        // If referrer is student or alumni, register them into the local CRM Student DB now (on save)
+        if (resolvedRefType === 'student' || resolvedRefType === 'alumni') {
+          const cleanRefPhone = sanitizePhone(referralData.referrerPhone)
+          let student = null
+
+          if (referralData.referrerStudentId && mongoose.Types.ObjectId.isValid(referralData.referrerStudentId)) {
+            student = await Student.findById(referralData.referrerStudentId)
+          }
+          if (!student && referralData.lmsUserId) {
+            student = await Student.findOne({ lmsUserId: referralData.lmsUserId })
+          }
+          if (!student && cleanRefPhone) {
+            student = await Student.findOne({ phone: cleanRefPhone })
+          }
+
+          if (!student) {
+            student = new Student({
+              name: referralData.referrerName || 'LMS Student',
+              phone: cleanRefPhone || referralData.referrerPhone || '',
+              email: referralData.referrerEmail || '',
+              course: referralData.referrerCourse || '',
+              batch: referralData.referrerBatch || '',
+              isAlumni: resolvedRefType === 'alumni',
+              status: resolvedRefType === 'alumni' ? 'alumni' : 'active',
+              studentId: referralData.referrerRollNo || '',
+              lmsUserId: referralData.lmsUserId || '',
+              isVerifiedLms: Boolean(referralData.isVerifiedLms ?? true),
+            })
+            await student.save()
+          } else {
+            let updated = false
+            if (referralData.lmsUserId && !student.lmsUserId) { student.lmsUserId = referralData.lmsUserId; updated = true; }
+            if (referralData.referrerCourse && !student.course) { student.course = referralData.referrerCourse; updated = true; }
+            if (referralData.referrerBatch && !student.batch) { student.batch = referralData.referrerBatch; updated = true; }
+            if (resolvedRefType === 'alumni' && !student.isAlumni) { student.isAlumni = true; student.status = 'alumni'; updated = true; }
+            if (!student.isVerifiedLms && referralData.isVerifiedLms) { student.isVerifiedLms = true; updated = true; }
+            if (updated) await student.save()
+          }
+
+          linkedStudentId = student._id
+        }
+
         const refDoc = new Referral({
-          referralType: referralData.referralType,
+          referralType: resolvedRefType,
           referredLeadId: saved._id,
-          referrerLeadId: referralData.referrerLeadId || null,
-          referrerStudentId: referralData.referrerStudentId || null,
+          referrerLeadId: resolvedRefType === 'lead' ? (referralData.referrerLeadId || null) : null,
+          referrerStudentId: (resolvedRefType === 'student' || resolvedRefType === 'alumni') ? linkedStudentId : null,
           referrerName: referralData.referrerName || 'Referrer',
           referrerPhone: referralData.referrerPhone || '',
           referrerEmail: referralData.referrerEmail || '',
           referrerCourse: referralData.referrerCourse || '',
           referrerBatch: referralData.referrerBatch || '',
-          isAlumni: referralData.referralType === 'alumni',
+          isAlumni: resolvedRefType === 'alumni',
           referredCandidateName: saved.fullName,
           referredCandidatePhone: saved.phone,
           referredCandidateCourse: saved.courseProgram,
@@ -2187,6 +2233,7 @@ export const createLead = async (req, res) => {
         })
         const savedRef = await refDoc.save()
         saved.referral.referralId = savedRef._id
+        saved.referral.referralType = resolvedRefType
         await saved.save()
       } catch (refErr) {
         console.error('[createLead] Error saving referral link:', refErr)
