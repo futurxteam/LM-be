@@ -2,6 +2,7 @@ import MetaIntegration from '../models/MetaIntegration.js'
 import User from '../models/User.js'
 import Lead from '../models/Lead.js'
 import CounselorGroup from '../models/CounselorGroup.js'
+import { isCounselorPaused } from '../utils/counselorUtils.js'
 
 /**
  * Capacity-Aware Round-Robin Lead Allocation Engine
@@ -54,6 +55,14 @@ export async function allocateLead(formId) {
     if (candidates.length === 0) {
       candidates = await User.find({ role: 'sales', active: true })
     }
+
+    // Exclude paused counselors (scheduled pause or manually paused)
+    const availableCandidates = candidates.filter(c => !isCounselorPaused(c))
+    if (availableCandidates.length < candidates.length) {
+      const pausedNames = candidates.filter(c => isCounselorPaused(c)).map(c => c.name).join(', ')
+      console.log(`⏸️ [Allocation Engine] Skipping paused counselor(s): ${pausedNames}`)
+    }
+    candidates = availableCandidates
 
     // If still no counselors exist in the system, keep in system pool
     if (candidates.length === 0) {

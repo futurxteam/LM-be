@@ -2,6 +2,7 @@ import express from 'express'
 import multer from 'multer'
 import {
   getLeads,
+  getLeadById,
   getFollowupSchedule,
   getSalesRepsList,
   uploadLeads,
@@ -63,6 +64,7 @@ router.post('/auto-assign', autoAssignLeads)
 router.post('/unassign', unassignLeads)
 
 // Status, Steps & Lost Recycling
+router.get('/:id', getLeadById)
 router.post('/bulk-delete', requireAdmin, bulkDeleteLeads)
 router.post('/bulk-recycle', requireAdmin, bulkRecycleLeads)
 router.post('/:id/steps', addLeadStep)

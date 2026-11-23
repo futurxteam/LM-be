@@ -17,24 +17,25 @@ function escapeRegex(str) {
 async function ensureInitialAdvisorBackfill() {
   if (initialAdvisorBackfilled) return
   try {
-    await Lead.updateMany(
-      {
-        'assignedTo.repId': { $exists: true, $ne: null },
-        $or: [
-          { initialAdvisor: { $exists: false } },
-          { initialAdvisor: null },
-          { 'initialAdvisor.repId': { $exists: false } },
-          { 'initialAdvisor.repId': null },
-        ],
-      },
-      [
-        {
-          $set: {
-            initialAdvisor: '$assignedTo',
-          },
+    const unbackfilledLeads = await Lead.find({
+      'assignedTo.repId': { $exists: true, $ne: null },
+      $or: [
+        { initialAdvisor: { $exists: false } },
+        { initialAdvisor: null },
+        { 'initialAdvisor.repId': { $exists: false } },
+        { 'initialAdvisor.repId': null },
+      ],
+    }).select('_id assignedTo').lean()
+
+    if (unbackfilledLeads.length > 0) {
+      const ops = unbackfilledLeads.map(l => ({
+        updateOne: {
+          filter: { _id: l._id },
+          update: { $set: { initialAdvisor: l.assignedTo } },
         },
-      ]
-    )
+      }))
+      await Lead.bulkWrite(ops)
+    }
     initialAdvisorBackfilled = true
   } catch (err) {
     console.warn('[ensureInitialAdvisorBackfill] warning:', err.message)
@@ -583,6 +584,13 @@ export const disableOrEnableUser = async (req, res) => {
     const assignedQuery = { 'assignedTo.repId': { $in: idVariants } }
 
     // 1. Always lock initialAdvisor = this advisor on every assigned lead missing initialAdvisor
+    const initialAdvisorPayload = {
+      repId: user._id,
+      repName: user.name,
+      repRole: user.title || user.role || 'Admissions Counselor',
+      assignedAt: user.createdAt || new Date(),
+    }
+
     await Lead.updateMany(
       {
         ...assignedQuery,
@@ -593,13 +601,11 @@ export const disableOrEnableUser = async (req, res) => {
           { 'initialAdvisor.repId': null },
         ],
       },
-      [
-        {
-          $set: {
-            initialAdvisor: '$assignedTo',
-          },
+      {
+        $set: {
+          initialAdvisor: initialAdvisorPayload,
         },
-      ]
+      }
     )
 
     let handedOverCount = 0
@@ -714,3 +720,64 @@ export const deleteUser = async (req, res) => {
       'Removing staff accounts is disabled so lead history and initial advisor records are never lost. Use Disable Account instead.',
   })
 }
+
+// -------------------------------------------------------------
+// PATCH /api/users/:id/pause - Pause or Resume Sales Counselor
+// -------------------------------------------------------------
+export const pauseOrResumeUser = async (req, res) => {
+  try {
+    const { id } = req.params
+    const { isPaused, pauseStartDate, pauseEndDate, pauseReason } = req.body
+
+    const user = await User.findById(id)
+    if (!user) {
+      return res.status(404).json({ success: false, message: 'User not found' })
+    }
+
+    if (user.role === 'admin') {
+      return res.status(400).json({ success: false, message: 'Admin accounts cannot be paused' })
+    }
+
+    const pausing = isPaused !== undefined ? Boolean(isPaused) : !user.isPaused
+
+    user.isPaused = pausing
+    if (pausing) {
+      user.pauseStartDate = pauseStartDate ? new Date(pauseStartDate) : new Date()
+      user.pauseEndDate = pauseEndDate ? new Date(pauseEndDate) : null
+      user.pauseReason = pauseReason || ''
+      user.pausedAt = new Date()
+      user.pausedBy = req.user?._id || null
+    } else {
+      user.pauseStartDate = null
+      user.pauseEndDate = null
+      user.pauseReason = ''
+      user.pausedAt = null
+      user.pausedBy = null
+    }
+
+    await user.save()
+
+    return res.status(200).json({
+      success: true,
+      message: pausing
+        ? `${user.name} has been paused from round-robin allocation.${
+            user.pauseEndDate
+              ? ` Auto-resumes on ${new Date(user.pauseEndDate).toLocaleDateString()}`
+              : ''
+          }`
+        : `${user.name} has resumed. Round-robin lead allocation is active.`,
+      user: {
+        id: user._id.toString(),
+        name: user.name,
+        isPaused: user.isPaused,
+        pauseStartDate: user.pauseStartDate,
+        pauseEndDate: user.pauseEndDate,
+        pauseReason: user.pauseReason,
+      },
+    })
+  } catch (error) {
+    console.error('[pauseOrResumeUser] Error:', error)
+    return res.status(500).json({ success: false, message: 'Failed to update pause status', error: error.message })
+  }
+}
+

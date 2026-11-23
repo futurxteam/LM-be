@@ -236,6 +236,17 @@ const leadSchema = new mongoose.Schema(
     financialHistory: [financialAuditSchema],
     ownershipHistory: [ownershipHistorySchema],
     notes: [noteSchema],
+
+    // Referral association
+    referral: {
+      isReferred: { type: Boolean, default: false, index: true },
+      referralId: { type: mongoose.Schema.Types.ObjectId, ref: 'Referral', default: null },
+      referralType: { type: String, enum: ['lead', 'student', 'alumni', ''], default: '' },
+      referrerName: { type: String, default: '' },
+      referrerPhone: { type: String, default: '' },
+      referrerCourse: { type: String, default: '' },
+      referrerBatch: { type: String, default: '' },
+    },
   },
   { timestamps: true }
 )

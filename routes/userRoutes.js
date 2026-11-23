@@ -4,6 +4,7 @@ import {
   createUser,
   updateUser,
   disableOrEnableUser,
+  pauseOrResumeUser,
   getUserHistory,
   deleteUser,
 } from '../controllers/userController.js'
@@ -16,6 +17,7 @@ router.post('/', createUser)
 router.put('/:id', updateUser)
 router.patch('/:id', updateUser)
 router.patch('/:id/disable', disableOrEnableUser)
+router.patch('/:id/pause', pauseOrResumeUser)
 router.delete('/:id', deleteUser)
 
 export default router

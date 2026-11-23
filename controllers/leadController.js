@@ -3,6 +3,8 @@ import Lead from '../models/Lead.js'
 import User from '../models/User.js'
 import MetaIntegration from '../models/MetaIntegration.js'
 import CourseProgram, { ensureDefaultPrograms } from '../models/CourseProgram.js'
+import Referral from '../models/Referral.js'
+import Student from '../models/Student.js'
 import {
   getOrCreateCrmSettings,
   LEAD_STATUSES,
@@ -13,6 +15,7 @@ import {
 import { isLeadAssignedToUser } from '../middleware/authMiddleware.js'
 import { parseLeadsData, sanitizePhone } from '../utils/leadParser.js'
 import { allocateLead } from '../services/allocationService.js'
+import { isCounselorPaused } from '../utils/counselorUtils.js'
 
 /**
  * Escape special regex characters so phone numbers with '+' or symbols never crash RegExp
@@ -112,7 +115,9 @@ function countCurrentCycleInteractions(lead) {
  * Prefers active counselors other than excludeRepId when available
  */
 async function pickRoundRobinCounselor(excludeRepId = null) {
-  const allActiveReps = await User.find({ role: 'sales', active: { $ne: false } }).lean()
+  const allActiveReps = (await User.find({ role: 'sales', active: { $ne: false } }).lean()).filter(
+    r => !isCounselorPaused(r)
+  )
   if (allActiveReps.length === 0) return null
 
   const filtered = excludeRepId
@@ -344,6 +349,35 @@ async function applyLifecycleUpdate(lead, payload, actor, settings) {
       if (nextPaidAmount === null || nextPaidAmount === undefined || Number.isNaN(nextPaidAmount) || nextPaidAmount < 0) {
         return {
           error: 'Paid Amount (total received >= 0) is mandatory for Business statuses.',
+          statusCode: 400,
+        }
+      }
+    }
+
+    // Business Amount & Progression Thresholds:
+    // 1. CONVERTED BUSINESS strictly requires total collected fee >= ₹10,000
+    if (nextStatus === 'CONVERTED BUSINESS' && !bypassAllowed) {
+      if (nextPaidAmount === null || nextPaidAmount === undefined || Number(nextPaidAmount) < 10000) {
+        return {
+          error: 'Converted Business requires a minimum payment of ₹10,000. For token or booking payments below ₹10,000, please select Qualified.',
+          statusCode: 400,
+        }
+      }
+    }
+
+    // 2. ONBOARDED BUSINESS can ONLY be reached from CONVERTED BUSINESS
+    if (nextStatus === 'ONBOARDED BUSINESS' && !bypassAllowed) {
+      const isCurrentlyConverted =
+        prevStatus === 'CONVERTED BUSINESS' || Boolean(lead.milestoneHistory?.convertedAt)
+      if (!isCurrentlyConverted) {
+        return {
+          error: 'A lead must first be in Converted Business state (with at least ₹10,000 paid) before it can be Onboarded.',
+          statusCode: 400,
+        }
+      }
+      if (nextPaidAmount === null || nextPaidAmount === undefined || Number(nextPaidAmount) < 10000) {
+        return {
+          error: 'Onboarded Business requires at least ₹10,000 collected.',
           statusCode: 400,
         }
       }
@@ -1192,6 +1226,24 @@ export const pasteLeads = async (req, res) => {
 }
 
 // -------------------------------------------------------------
+// GET /api/leads/:id (Fetch single lead by ID for Profile view)
+// -------------------------------------------------------------
+export const getLeadById = async (req, res) => {
+  try {
+    const { id } = req.params
+    const lead = await Lead.findById(id)
+    if (!lead) {
+      return res.status(404).json({ success: false, message: 'Lead not found in database' })
+    }
+    const formatted = sanitizeLeadForRole(lead, req.user?.role || 'sales')
+    return res.status(200).json({ success: true, lead: formatted })
+  } catch (error) {
+    return res.status(500).json({ success: false, message: error.message })
+  }
+}
+
+
+// -------------------------------------------------------------
 // POST /api/leads/assign (Manual assignment in MongoDB)
 // -------------------------------------------------------------
 export const assignLeads = async (req, res) => {
@@ -1303,9 +1355,15 @@ export const autoAssignLeads = async (req, res) => {
   try {
     const { leadIds, search } = req.body || {}
 
-    const activeReps = await User.find({ role: 'sales', active: { $ne: false } }).lean()
+    const allReps = await User.find({ role: 'sales', active: { $ne: false } }).lean()
+    const activeReps = allReps.filter(r => !isCounselorPaused(r))
     if (!activeReps || activeReps.length === 0) {
-      return res.status(400).json({ success: false, message: 'No active sales reps found in database' })
+      return res.status(400).json({
+        success: false,
+        message: allReps.length > 0
+          ? 'All sales reps are currently paused from receiving leads'
+          : 'No active sales reps found in database',
+      })
     }
 
     let query = { assignmentStatus: 'UNASSIGNED' }
@@ -1460,6 +1518,39 @@ export const unassignLeads = async (req, res) => {
   }
 }
 
+async function syncReferralForLead(lead) {
+  try {
+    if (!lead || !lead._id) return
+    const refDoc = await Referral.findOne({ referredLeadId: lead._id })
+    if (!refDoc) return
+
+    refDoc.leadStatus = lead.leadStatus || 'NEW LEAD'
+    refDoc.courseFees = Number(lead.courseFees) || 0
+    refDoc.paidAmount = Number(lead.paidAmount) || 0
+    refDoc.isQualified = (Number(lead.paidAmount) || 0) > 0 && (Number(lead.paidAmount) || 0) < 10000
+    refDoc.isConverted =
+      (Number(lead.paidAmount) || 0) >= 10000 ||
+      lead.leadStatus === 'CONVERTED BUSINESS' ||
+      lead.leadStatus === 'ONBOARDED BUSINESS'
+    refDoc.isOnboarded = lead.leadStatus === 'ONBOARDED BUSINESS'
+    if (refDoc.isConverted && !refDoc.convertedAt) {
+      refDoc.convertedAt = lead.milestoneHistory?.convertedAt || new Date()
+    }
+    if (refDoc.isOnboarded && !refDoc.onboardedAt) {
+      refDoc.onboardedAt = lead.milestoneHistory?.onboardedAt || new Date()
+    }
+    if (lead.assignedTo?.repId) {
+      refDoc.assignedCounselor = {
+        repId: lead.assignedTo.repId,
+        repName: lead.assignedTo.repName,
+      }
+    }
+    await refDoc.save()
+  } catch (err) {
+    console.error('Error syncing referral for lead:', err)
+  }
+}
+
 // -------------------------------------------------------------
 // PATCH /api/leads/:id/status & POST /api/leads/:id/steps
 // Only Admin or the assigned Sales Counselor may update status & add steps
@@ -1491,6 +1582,7 @@ export const updateLeadStatus = async (req, res) => {
     }
 
     await lead.save()
+    await syncReferralForLead(lead)
     const formatted = sanitizeLeadForRole(lead, actor?.role || 'sales')
 
     res.status(200).json({
@@ -1962,6 +2054,7 @@ export const createLead = async (req, res) => {
       status,
       subStatus,
       author,
+      referralData,
     } = req.body
 
     const nameVal = (fullName || name || '').trim()
@@ -2055,9 +2148,51 @@ export const createLead = async (req, res) => {
           timestamp: new Date(),
         },
       ],
+      referral: referralData && referralData.hasReferral
+        ? {
+            isReferred: true,
+            referralType: referralData.referralType,
+            referrerName: referralData.referrerName || '',
+            referrerPhone: referralData.referrerPhone || '',
+            referrerCourse: referralData.referrerCourse || '',
+            referrerBatch: referralData.referrerBatch || '',
+          }
+        : undefined,
     })
 
     const saved = await newLead.save()
+
+    if (referralData && referralData.hasReferral) {
+      try {
+        const refDoc = new Referral({
+          referralType: referralData.referralType,
+          referredLeadId: saved._id,
+          referrerLeadId: referralData.referrerLeadId || null,
+          referrerStudentId: referralData.referrerStudentId || null,
+          referrerName: referralData.referrerName || 'Referrer',
+          referrerPhone: referralData.referrerPhone || '',
+          referrerEmail: referralData.referrerEmail || '',
+          referrerCourse: referralData.referrerCourse || '',
+          referrerBatch: referralData.referrerBatch || '',
+          isAlumni: referralData.referralType === 'alumni',
+          referredCandidateName: saved.fullName,
+          referredCandidatePhone: saved.phone,
+          referredCandidateCourse: saved.courseProgram,
+          leadStatus: saved.leadStatus || 'NEW LEAD',
+          courseFees: 0,
+          paidAmount: 0,
+          assignedCounselor: saved.assignedTo
+            ? { repId: saved.assignedTo.repId, repName: saved.assignedTo.repName }
+            : null,
+        })
+        const savedRef = await refDoc.save()
+        saved.referral.referralId = savedRef._id
+        await saved.save()
+      } catch (refErr) {
+        console.error('[createLead] Error saving referral link:', refErr)
+      }
+    }
+
     res.status(201).json({
       success: true,
       message: `Lead for ${saved.fullName} created successfully`,
