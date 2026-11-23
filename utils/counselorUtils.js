@@ -31,3 +31,4 @@ export function isCounselorPaused(counselor, atDate = new Date()) {
   // Indefinite manual pause
   return true
 }
+
