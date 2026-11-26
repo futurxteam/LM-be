@@ -77,6 +77,7 @@ export const login = async (req, res) => {
         active: user.active !== false,
         groupId: user.groupId || null,
         isGroupManager: Boolean(user.isGroupManager),
+        receiveLeads: user.receiveLeads !== false,
       },
     })
   } catch (error) {

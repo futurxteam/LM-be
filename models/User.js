@@ -22,6 +22,7 @@ const userSchema = new mongoose.Schema(
     pausedBy: { type: mongoose.Schema.Types.ObjectId, ref: 'User', default: null },
     groupId: { type: mongoose.Schema.Types.ObjectId, ref: 'CounselorGroup', default: null },
     isGroupManager: { type: Boolean, default: false },
+    receiveLeads: { type: Boolean, default: true },
   },
   { timestamps: true }
 )

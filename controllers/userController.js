@@ -172,6 +172,7 @@ export const getAllUsers = async (req, res) => {
           disabledAt: u.disabledAt || null,
           groupId: u.groupId || null,
           isGroupManager: Boolean(u.isGroupManager),
+          receiveLeads: u.receiveLeads !== false,
           totalAssigned,
           openAssignedCount,
           activeCount: openAssignedCount,
@@ -430,7 +431,7 @@ export const createUser = async (req, res) => {
 export const updateUser = async (req, res) => {
   try {
     const { id } = req.params
-    const { name, email, password, role, title, specialty, active, groupId, isGroupManager } = req.body
+    const { name, email, password, role, title, specialty, active, groupId, isGroupManager, receiveLeads } = req.body
 
     const user = await User.findById(id)
     if (!user) {
@@ -489,6 +490,10 @@ export const updateUser = async (req, res) => {
       const nextActive = Boolean(active)
       user.active = nextActive
       user.disabledAt = nextActive ? null : user.disabledAt || new Date()
+    }
+
+    if (receiveLeads !== undefined) {
+      user.receiveLeads = Boolean(receiveLeads)
     }
 
     await user.save()

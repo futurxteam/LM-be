@@ -30,14 +30,19 @@ export async function allocateLead(formId) {
     let candidates = []
     let assignedGroupId = form?.assignedGroupId || null
 
+    const eligibleBaseFilter = {
+      active: { $ne: false },
+      role: { $in: ['sales', 'manager'] },
+      receiveLeads: { $ne: false },
+    }
+
     // 1. Check if assigned to a specific Group
     if (assignedGroupId) {
       const group = await CounselorGroup.findById(assignedGroupId)
       if (group && group.memberIds && group.memberIds.length > 0) {
         candidates = await User.find({
           _id: { $in: group.memberIds },
-          active: true,
-          role: 'sales',
+          ...eligibleBaseFilter,
         })
       }
     }
@@ -46,14 +51,13 @@ export async function allocateLead(formId) {
     if (candidates.length === 0 && form?.assignedCounselorIds && form.assignedCounselorIds.length > 0) {
       candidates = await User.find({
         _id: { $in: form.assignedCounselorIds },
-        active: true,
-        role: 'sales',
+        ...eligibleBaseFilter,
       })
     }
 
-    // 3. Default: Fallback to all active Admissions Counselors
+    // 3. Default: Fallback to all active eligible Admissions Counselors (excludes Manage-Only Group Managers)
     if (candidates.length === 0) {
-      candidates = await User.find({ role: 'sales', active: true })
+      candidates = await User.find(eligibleBaseFilter)
     }
 
     // Exclude paused counselors (scheduled pause or manually paused)
@@ -64,9 +68,9 @@ export async function allocateLead(formId) {
     }
     candidates = availableCandidates
 
-    // If still no counselors exist in the system, keep in system pool
+    // If still no eligible counselors exist in the system (no users, all paused, or manage-only), place in System Pool
     if (candidates.length === 0) {
-      console.warn('⚠️ [Allocation Engine] No active sales counselors found in database. Lead will be placed as UNASSIGNED in Pool.')
+      console.warn('⚠️ [Allocation Engine] No eligible active counselors found in database. Lead placed as UNASSIGNED in System Pool.')
       return {
         assignmentStatus: 'UNASSIGNED',
         assignedTo: null,

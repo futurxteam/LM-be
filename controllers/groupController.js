@@ -8,8 +8,8 @@ import Lead from '../models/Lead.js'
 export const getAllGroups = async (req, res) => {
   try {
     const groups = await CounselorGroup.find()
-      .populate('managerId', 'name email title specialty avatar active')
-      .populate('memberIds', 'name email title specialty avatar active isGroupManager')
+      .populate('managerId', 'name email title specialty avatar active isGroupManager receiveLeads')
+      .populate('memberIds', 'name email title specialty avatar active isGroupManager receiveLeads')
       .sort({ createdAt: -1 })
 
     // Compute live stats for each group
@@ -78,7 +78,7 @@ export const getAllGroups = async (req, res) => {
 // -------------------------------------------------------------
 export const createGroup = async (req, res) => {
   try {
-    const { name, description, managerId, memberIds, active } = req.body
+    const { name, description, managerId, memberIds, active, managerReceivesLeads = true } = req.body
 
     if (!name || !name.trim()) {
       return res.status(400).json({ success: false, message: 'Group name is required' })
@@ -110,7 +110,13 @@ export const createGroup = async (req, res) => {
       await User.updateMany({ _id: { $in: members } }, { $set: { groupId: saved._id } })
     }
     if (managerId) {
-      await User.findByIdAndUpdate(managerId, { $set: { isGroupManager: true, groupId: saved._id } })
+      await User.findByIdAndUpdate(managerId, {
+        $set: {
+          isGroupManager: true,
+          groupId: saved._id,
+          receiveLeads: managerReceivesLeads !== false,
+        },
+      })
     }
 
     res.status(201).json({
@@ -129,7 +135,7 @@ export const createGroup = async (req, res) => {
 export const updateGroup = async (req, res) => {
   try {
     const { id } = req.params
-    const { name, description, managerId, memberIds, active } = req.body
+    const { name, description, managerId, memberIds, active, managerReceivesLeads } = req.body
 
     const group = await CounselorGroup.findById(id)
     if (!group) {
@@ -156,16 +162,23 @@ export const updateGroup = async (req, res) => {
 
     // Reset previous manager flag if manager changed
     if (oldManagerId && oldManagerId !== String(managerId)) {
-      await User.findByIdAndUpdate(oldManagerId, { $set: { isGroupManager: false } })
+      await User.findByIdAndUpdate(oldManagerId, { $set: { isGroupManager: false, receiveLeads: true } })
     }
 
-    // Set new manager flag
+    // Set new manager flag & lead-allocation preference
     if (managerId) {
-      await User.findByIdAndUpdate(managerId, { $set: { isGroupManager: true, groupId: updated._id } })
+      const mgrUpdate = { isGroupManager: true, groupId: updated._id }
+      if (managerReceivesLeads !== undefined) {
+        mgrUpdate.receiveLeads = managerReceivesLeads !== false
+      }
+      await User.findByIdAndUpdate(managerId, { $set: mgrUpdate })
     }
 
     // Sync members groupId
-    await User.updateMany({ groupId: updated._id, _id: { $nin: members } }, { $set: { groupId: null, isGroupManager: false } })
+    await User.updateMany(
+      { groupId: updated._id, _id: { $nin: members } },
+      { $set: { groupId: null, isGroupManager: false, receiveLeads: true } }
+    )
     await User.updateMany({ _id: { $in: members } }, { $set: { groupId: updated._id } })
 
     res.status(200).json({
@@ -190,7 +203,7 @@ export const deleteGroup = async (req, res) => {
     }
 
     // Clear groupId and isGroupManager on member users
-    await User.updateMany({ groupId: id }, { $set: { groupId: null, isGroupManager: false } })
+    await User.updateMany({ groupId: id }, { $set: { groupId: null, isGroupManager: false, receiveLeads: true } })
 
     await CounselorGroup.findByIdAndDelete(id)
 

@@ -105,7 +105,10 @@ export const getStats = async (req, res) => {
     })
 
     // 3. Reps Leaderboard directly from MongoDB
-    const salesReps = await User.find({ role: 'sales' }).lean()
+    const salesReps = await User.find({
+      role: { $in: ['sales', 'manager'] },
+      receiveLeads: { $ne: false },
+    }).lean()
     const repsReport = await Promise.all(
       salesReps.map(async rep => {
         const repId = rep._id
@@ -693,9 +696,9 @@ export const getAdvancedReports = async (req, res) => {
       maxLostPageNum * maxLostPageSize
     )
 
-    // 6. Counselor Performance Matrix
+    // 6. Counselor Performance Matrix (excludes Manage-Only Group Managers with receiveLeads: false)
     const [allSalesRepsRaw, allCounselorGroupsRaw] = await Promise.all([
-      User.find({ role: { $in: ['sales', 'manager'] } }).lean(),
+      User.find({ role: { $in: ['sales', 'manager'] }, receiveLeads: { $ne: false } }).lean(),
       CounselorGroup.find().populate('managerId', 'name email title').lean(),
     ])
     const salesReps = scope.allowedRepIds
@@ -948,7 +951,7 @@ export const getFrdReports = async (req, res) => {
     }
 
     const [allSalesRepsRaw, allCounselorGroupsRaw] = await Promise.all([
-      User.find({ role: { $in: ['sales', 'manager'] } }).sort({ active: -1, name: 1 }).lean(),
+      User.find({ role: { $in: ['sales', 'manager'] }, receiveLeads: { $ne: false } }).sort({ active: -1, name: 1 }).lean(),
       CounselorGroup.find().populate('managerId', 'name email').lean(),
     ])
 

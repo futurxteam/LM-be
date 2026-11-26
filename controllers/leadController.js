@@ -115,9 +115,13 @@ function countCurrentCycleInteractions(lead) {
  * Prefers active counselors other than excludeRepId when available
  */
 async function pickRoundRobinCounselor(excludeRepId = null) {
-  const allActiveReps = (await User.find({ role: 'sales', active: { $ne: false } }).lean()).filter(
-    r => !isCounselorPaused(r)
-  )
+  const allActiveReps = (
+    await User.find({
+      role: { $in: ['sales', 'manager'] },
+      active: { $ne: false },
+      receiveLeads: { $ne: false },
+    }).lean()
+  ).filter(r => !isCounselorPaused(r))
   if (allActiveReps.length === 0) return null
 
   const filtered = excludeRepId
@@ -1434,7 +1438,11 @@ export const autoAssignLeads = async (req, res) => {
   try {
     const { leadIds, search } = req.body || {}
 
-    const allReps = await User.find({ role: 'sales', active: { $ne: false } }).lean()
+    const allReps = await User.find({
+      role: { $in: ['sales', 'manager'] },
+      active: { $ne: false },
+      receiveLeads: { $ne: false },
+    }).lean()
     const activeReps = allReps.filter(r => !isCounselorPaused(r))
     if (!activeReps || activeReps.length === 0) {
       return res.status(400).json({
@@ -2205,10 +2213,10 @@ export const createLead = async (req, res) => {
       }
       leadGroupId = counselor?.groupId || groupId || null
     } else {
-      // Automatic capacity-aware round-robin assignment
+      // Automatic capacity-aware round-robin assignment (falls back to System Pool if no eligible users exist)
       const allocation = await allocateLead(formId)
-      leadAssignmentStatus = allocation.assignmentStatus || 'ASSIGNED'
       leadAssignedTo = allocation.assignedTo || null
+      leadAssignmentStatus = leadAssignedTo ? (allocation.assignmentStatus || 'ASSIGNED') : 'UNASSIGNED'
       leadGroupId = allocation.groupId || null
     }
 
