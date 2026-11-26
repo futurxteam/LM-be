@@ -5,6 +5,7 @@ import MetaIntegration from '../models/MetaIntegration.js'
 import CourseProgram, { ensureDefaultPrograms } from '../models/CourseProgram.js'
 import Referral from '../models/Referral.js'
 import Student from '../models/Student.js'
+import CounselorGroup from '../models/CounselorGroup.js'
 import {
   getOrCreateCrmSettings,
   LEAD_STATUSES,
@@ -968,7 +969,34 @@ export const getFollowupSchedule = async (req, res) => {
       { isDropped: { $ne: true } },
     ]
 
-    if (!isAdmin) {
+    const isManager = !isAdmin && (req.user?.role === 'manager' || Boolean(req.user?.isGroupManager))
+
+    if (isManager) {
+      const allGroups = await CounselorGroup.find().lean()
+      const managedGroups = allGroups.filter(
+        g =>
+          (g.managerId && String(g.managerId) === callerId) ||
+          (req.user?.groupId && String(g._id) === String(req.user.groupId))
+      )
+      const teamSet = new Set([callerId])
+      for (const g of managedGroups) {
+        if (g.managerId) teamSet.add(String(g.managerId))
+        for (const m of g.memberIds || []) teamSet.add(String(m))
+      }
+      const allowedIds = Array.from(teamSet)
+      const targetIds =
+        repId && repId !== 'All' && allowedIds.includes(String(repId))
+          ? [String(repId)]
+          : allowedIds
+      const idVariants = []
+      for (const rid of targetIds) {
+        idVariants.push(rid)
+        if (mongoose.Types.ObjectId.isValid(rid)) {
+          idVariants.push(new mongoose.Types.ObjectId(rid))
+        }
+      }
+      andConditions.push({ 'assignedTo.repId': { $in: idVariants } })
+    } else if (!isAdmin) {
       const idVariants = [callerId]
       if (mongoose.Types.ObjectId.isValid(callerId)) {
         idVariants.push(new mongoose.Types.ObjectId(callerId))
