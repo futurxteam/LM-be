@@ -7,6 +7,7 @@ const studentSchema = new mongoose.Schema(
     email: { type: String, default: '', trim: true },
     course: { type: String, default: '', trim: true },
     batch: { type: String, default: '', trim: true },
+    classTeacher: { type: String, default: '', trim: true },
     isAlumni: { type: Boolean, default: false },
     status: {
       type: String,

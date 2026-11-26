@@ -327,11 +327,66 @@ export const getStats = async (req, res) => {
 
 // -------------------------------------------------------------
 // GET /api/stats/advanced (ADMIN-ONLY)
+/**
+ * Resolves report scope for Admin vs Group Manager.
+ * - Admin: full org visibility (allowedRepIds: null, allowedGroupIds: null)
+ * - Group Manager: scoped strictly to their managed group(s) and team members
+ */
+async function resolveManagerReportScope(reqUser) {
+  const isAdmin = reqUser?.role === 'admin'
+  const isManager = !isAdmin && (reqUser?.role === 'manager' || Boolean(reqUser?.isGroupManager))
+  const callerId = String(reqUser?.id || reqUser?._id || '')
+
+  if (isAdmin) {
+    return { isAdmin: true, isManager: false, callerId, allowedRepIds: null, allowedGroupIds: null, managedGroups: [] }
+  }
+
+  if (isManager) {
+    const allGroups = await CounselorGroup.find().populate('managerId', 'name email title').lean()
+    const managedGroups = allGroups.filter(
+      g =>
+        (g.managerId && String(g.managerId._id || g.managerId) === callerId) ||
+        (reqUser?.groupId && String(g._id) === String(reqUser.groupId))
+    )
+    const repSet = new Set([callerId])
+    const groupIds = []
+    for (const g of managedGroups) {
+      groupIds.push(g._id.toString())
+      if (g.managerId) repSet.add(String(g.managerId._id || g.managerId))
+      for (const m of g.memberIds || []) {
+        repSet.add(String(m._id || m))
+      }
+    }
+    return {
+      isAdmin: false,
+      isManager: true,
+      callerId,
+      allowedRepIds: Array.from(repSet),
+      allowedGroupIds: groupIds,
+      managedGroups,
+    }
+  }
+
+  return { isAdmin: false, isManager: false, callerId, allowedRepIds: [callerId], allowedGroupIds: [], managedGroups: [] }
+}
+
+function buildRepIdVariants(repIds = []) {
+  const variants = []
+  for (const rid of repIds) {
+    variants.push(String(rid))
+    if (mongoose.Types.ObjectId.isValid(rid)) variants.push(new mongoose.Types.ObjectId(rid))
+  }
+  return variants
+}
+
+// -------------------------------------------------------------
+// GET /api/stats/advanced
 // Hot / Warm / Cold Visual & Table Reports, 10-Status Lifecycle Funnel,
 // Recyclable Lost Cycles, Business Value vs Paid Collection & Counselor Matrix
 // -------------------------------------------------------------
 export const getAdvancedReports = async (req, res) => {
   try {
+    const scope = await resolveManagerReportScope(req.user)
     const {
       heatTier,
       leadStatus,
@@ -361,6 +416,9 @@ export const getAdvancedReports = async (req, res) => {
 
     // Exclude System Pool (UNASSIGNED) leads from all reports — System Pool appears only in Assign Pool tab
     const andConditions = [{ assignmentStatus: 'ASSIGNED' }]
+    if (scope.allowedRepIds && scope.allowedRepIds.length > 0) {
+      andConditions.push({ 'assignedTo.repId': { $in: buildRepIdVariants(scope.allowedRepIds) } })
+    }
     if (fromDate || toDate) {
       const dateFilter = {}
       if (fromDate) dateFilter.$gte = new Date(fromDate)
@@ -636,10 +694,16 @@ export const getAdvancedReports = async (req, res) => {
     )
 
     // 6. Counselor Performance Matrix
-    const [salesReps, counselorGroups] = await Promise.all([
-      User.find({ role: 'sales' }).lean(),
+    const [allSalesRepsRaw, allCounselorGroupsRaw] = await Promise.all([
+      User.find({ role: { $in: ['sales', 'manager'] } }).lean(),
       CounselorGroup.find().populate('managerId', 'name email title').lean(),
     ])
+    const salesReps = scope.allowedRepIds
+      ? allSalesRepsRaw.filter(r => scope.allowedRepIds.includes(r._id.toString()))
+      : allSalesRepsRaw
+    const counselorGroups = scope.allowedGroupIds
+      ? allCounselorGroupsRaw.filter(g => scope.allowedGroupIds.includes(g._id.toString()))
+      : allCounselorGroupsRaw
     const counselorMatrix = salesReps.map(rep => {
       const repIdStr = rep._id.toString()
       const repLeads = normalizedLeads.filter(
@@ -854,8 +918,11 @@ export const getAdvancedReports = async (req, res) => {
 // -------------------------------------------------------------
 export const getFrdReports = async (req, res) => {
   try {
-    const isAdmin = req.user?.role === 'admin'
-    const callerId = String(req.user?.id || req.user?._id || '')
+    const scope = await resolveManagerReportScope(req.user)
+    const isAdmin = scope.isAdmin
+    const isManager = scope.isManager
+    const hasFullReportTabs = isAdmin || isManager
+    const callerId = scope.callerId
     const {
       period = 'till_date', // 'current_month' | 'till_date' | 'custom'
       fromDate = '',
@@ -880,24 +947,32 @@ export const getFrdReports = async (req, res) => {
       if (toDate) endDateObj = new Date(`${toDate}T23:59:59.999`)
     }
 
-    const [allSalesReps, counselorGroups] = await Promise.all([
-      User.find({ role: 'sales' }).sort({ active: -1, name: 1 }).lean(),
+    const [allSalesRepsRaw, allCounselorGroupsRaw] = await Promise.all([
+      User.find({ role: { $in: ['sales', 'manager'] } }).sort({ active: -1, name: 1 }).lean(),
       CounselorGroup.find().populate('managerId', 'name email').lean(),
     ])
 
+    const allSalesReps = scope.allowedRepIds
+      ? allSalesRepsRaw.filter(r => scope.allowedRepIds.includes(r._id.toString()))
+      : allSalesRepsRaw
+    const counselorGroups = scope.allowedGroupIds
+      ? allCounselorGroupsRaw.filter(g => scope.allowedGroupIds.includes(g._id.toString()))
+      : allCounselorGroupsRaw
+
     // Determine visible reps based on role
     let scopedRepIds = null
-    if (!isAdmin) {
-      const managedGroups = counselorGroups.filter(
-        g => g.managerId && String(g.managerId._id || g.managerId) === callerId
-      )
-      if (managedGroups.length > 0 && req.query.scope === 'team') {
-        const set = new Set([callerId])
-        managedGroups.forEach(g => (g.memberIds || []).forEach(m => set.add(String(m))))
-        scopedRepIds = Array.from(set)
-      } else {
-        scopedRepIds = [callerId]
+    if (isManager) {
+      scopedRepIds = scope.allowedRepIds
+      if (groupId && groupId !== 'All') {
+        const grp = counselorGroups.find(g => String(g._id) === String(groupId))
+        if (grp) {
+          const set = new Set((grp.memberIds || []).map(m => String(m)))
+          if (grp.managerId?._id) set.add(String(grp.managerId._id))
+          scopedRepIds = Array.from(set)
+        }
       }
+    } else if (!isAdmin) {
+      scopedRepIds = [callerId]
     } else if (groupId && groupId !== 'All') {
       const grp = counselorGroups.find(g => String(g._id) === String(groupId))
       if (grp) {
@@ -911,15 +986,10 @@ export const getFrdReports = async (req, res) => {
     const andConditions = [{ assignmentStatus: 'ASSIGNED' }]
 
     if (scopedRepIds && scopedRepIds.length > 0) {
-      const variants = []
-      for (const rid of scopedRepIds) {
-        variants.push(rid)
-        if (mongoose.Types.ObjectId.isValid(rid)) variants.push(new mongoose.Types.ObjectId(rid))
-      }
-      andConditions.push({ 'assignedTo.repId': { $in: variants } })
+      andConditions.push({ 'assignedTo.repId': { $in: buildRepIdVariants(scopedRepIds) } })
     }
 
-    if (isAdmin && repId && repId !== 'All') {
+    if (hasFullReportTabs && repId && repId !== 'All') {
       if (mongoose.Types.ObjectId.isValid(repId)) {
         andConditions.push({
           $or: [
@@ -988,7 +1058,7 @@ export const getFrdReports = async (req, res) => {
     const visibleReps = allSalesReps.filter(rep => {
       const idStr = rep._id.toString()
       if (scopedRepIds && !scopedRepIds.includes(idStr)) return false
-      if (isAdmin && repId && repId !== 'All' && String(repId) !== idStr) return false
+      if (hasFullReportTabs && repId && repId !== 'All' && String(repId) !== idStr) return false
       return true
     })
 
@@ -1095,8 +1165,8 @@ export const getFrdReports = async (req, res) => {
         onboardedRatio: roundPct(oLeads.length, allocated),
       })
 
-      // FRD 7.3 Lead Status Report — strictly Admin-Only (HOT/WARM/COLD hidden from Sales)
-      if (isAdmin) {
+      // FRD 7.3 Lead Status Report — Admin & Group Manager (group-scoped for Managers)
+      if (hasFullReportTabs) {
         const countByStatus = st => userLeads.filter(l => (l.leadStatus || 'NEW LEAD') === st).length
         const hotCount = countByStatus('HOT')
         const warmCount = countByStatus('WARM')
@@ -1151,6 +1221,8 @@ export const getFrdReports = async (req, res) => {
         fromDate: startDateObj ? startDateObj.toISOString().slice(0, 10) : '',
         toDate: endDateObj ? endDateObj.toISOString().slice(0, 10) : '',
         isAdmin,
+        isManager,
+        hasFullReportTabs,
       },
       kpiTotals: {
         ...kpiTotals,
@@ -1159,7 +1231,7 @@ export const getFrdReports = async (req, res) => {
       },
       businessReport,
       conversionReport,
-      statusReport: isAdmin ? statusReport : undefined,
+      statusReport: hasFullReportTabs ? statusReport : undefined,
       filterOptions: {
         counselors: allSalesReps.map(r => ({
           id: r._id.toString(),
@@ -1172,6 +1244,352 @@ export const getFrdReports = async (req, res) => {
         })),
         programs: Array.from(programSet).sort(),
         sources: Array.from(sourceSet).sort(),
+      },
+    })
+  } catch (error) {
+    res.status(500).json({ success: false, message: error.message })
+  }
+}
+
+// -------------------------------------------------------------
+// GET /api/stats/discounts
+// Discount Analytics Report (Admin: org-wide; Group Manager: group-scoped)
+// Tracks discounts per month, by Sales Rep, by Group & Group Manager,
+// by Who Set the Discount, and across Qualified / Converted / Onboarded statuses.
+// -------------------------------------------------------------
+export const getDiscountReport = async (req, res) => {
+  try {
+    const scope = await resolveManagerReportScope(req.user)
+    const {
+      period = 'till_date', // 'current_month' | 'last_month' | 'till_date' | 'custom'
+      fromDate = '',
+      toDate = '',
+      status = 'All', // 'All' | 'QUALIFIED BUSINESS' | 'CONVERTED BUSINESS' | 'ONBOARDED BUSINESS'
+      repId = 'All',
+      groupId = 'All',
+      programName = 'All',
+    } = req.query
+
+    // Resolve date window
+    let startDateObj = null
+    let endDateObj = null
+    const now = new Date()
+    if (period === 'current_month') {
+      startDateObj = new Date(now.getFullYear(), now.getMonth(), 1, 0, 0, 0, 0)
+      endDateObj = new Date(now.getFullYear(), now.getMonth() + 1, 0, 23, 59, 59, 999)
+    } else if (period === 'last_month') {
+      startDateObj = new Date(now.getFullYear(), now.getMonth() - 1, 1, 0, 0, 0, 0)
+      endDateObj = new Date(now.getFullYear(), now.getMonth(), 0, 23, 59, 59, 999)
+    } else if (period === 'custom' && (fromDate || toDate)) {
+      if (fromDate) startDateObj = new Date(`${fromDate}T00:00:00.000`)
+      if (toDate) endDateObj = new Date(`${toDate}T23:59:59.999`)
+    }
+
+    const [allRepsRaw, allGroupsRaw] = await Promise.all([
+      User.find({ role: { $in: ['sales', 'manager', 'admin'] } }).sort({ name: 1 }).lean(),
+      CounselorGroup.find().populate('managerId', 'name email').lean(),
+    ])
+
+    const visibleReps = scope.allowedRepIds
+      ? allRepsRaw.filter(r => scope.allowedRepIds.includes(r._id.toString()))
+      : allRepsRaw.filter(r => r.role === 'sales' || r.role === 'manager')
+    const visibleGroups = scope.allowedGroupIds
+      ? allGroupsRaw.filter(g => scope.allowedGroupIds.includes(g._id.toString()))
+      : allGroupsRaw
+
+    // Map repId -> group info
+    const repToGroupMap = new Map()
+    for (const g of allGroupsRaw) {
+      const gInfo = {
+        groupId: g._id.toString(),
+        groupName: g.name,
+        managerId: g.managerId?._id?.toString() || (g.managerId ? String(g.managerId) : ''),
+        managerName: g.managerId?.name || 'Unassigned Manager',
+      }
+      if (gInfo.managerId) repToGroupMap.set(gInfo.managerId, gInfo)
+      for (const m of g.memberIds || []) {
+        repToGroupMap.set(String(m._id || m), gInfo)
+      }
+    }
+
+    // Build query for business leads with a discount
+    const andConditions = [
+      {
+        leadStatus:
+          status && status !== 'All'
+            ? status
+            : { $in: ['QUALIFIED BUSINESS', 'CONVERTED BUSINESS', 'ONBOARDED BUSINESS'] },
+      },
+      { discountAmount: { $gt: 0 } },
+    ]
+
+    // Scope for Group Manager
+    if (scope.allowedRepIds && scope.allowedRepIds.length > 0) {
+      andConditions.push({ 'assignedTo.repId': { $in: buildRepIdVariants(scope.allowedRepIds) } })
+    }
+
+    if (groupId && groupId !== 'All') {
+      const grp = visibleGroups.find(g => g._id.toString() === String(groupId))
+      if (grp) {
+        const gRepIds = new Set((grp.memberIds || []).map(m => String(m._id || m)))
+        if (grp.managerId) gRepIds.add(String(grp.managerId._id || grp.managerId))
+        andConditions.push({ 'assignedTo.repId': { $in: buildRepIdVariants(Array.from(gRepIds)) } })
+      }
+    }
+
+    if (repId && repId !== 'All') {
+      andConditions.push({ 'assignedTo.repId': { $in: buildRepIdVariants([repId]) } })
+    }
+
+    if (programName && programName !== 'All') {
+      andConditions.push({
+        $or: [{ businessProgramName: programName }, { courseProgram: programName }],
+      })
+    }
+
+    const rawLeads = await Lead.find({ $and: andConditions })
+      .select(
+        'fullName phone email leadStatus businessProgramName businessProgramVariant courseProgram courseFees agreedAmount discountAmount discountSetBy paidAmount assignedTo milestoneHistory updatedAt createdAt'
+      )
+      .sort({ updatedAt: -1 })
+      .lean()
+
+    // Filter by date window (using discountSetBy.setAt || qualifiedAt || convertedAt || updatedAt)
+    const filteredLeads = rawLeads.filter(l => {
+      const refDate = new Date(
+        l.discountSetBy?.setAt ||
+          l.milestoneHistory?.qualifiedAt ||
+          l.milestoneHistory?.convertedAt ||
+          l.updatedAt ||
+          l.createdAt
+      )
+      if (startDateObj && refDate < startDateObj) return false
+      if (endDateObj && refDate > endDateObj) return false
+      return true
+    })
+
+    const roundPct = (num, den) => (den > 0 ? Math.round((num / den) * 1000) / 10 : 0)
+
+    const kpiTotals = {
+      totalDiscountedLeads: 0,
+      totalStandardFees: 0,
+      totalAgreedAmount: 0,
+      totalDiscountGiven: 0,
+      avgDiscountPercent: 0,
+      qualifiedCount: 0,
+      convertedCount: 0,
+      onboardedCount: 0,
+      qualifiedDiscount: 0,
+      convertedDiscount: 0,
+      onboardedDiscount: 0,
+    }
+
+    const monthlyMap = new Map()
+    const repMap = new Map()
+    const groupMap = new Map()
+    const authorMap = new Map()
+    const programSet = new Set()
+    const leadRows = []
+
+    for (const l of filteredLeads) {
+      const stdFee = Number(l.courseFees) || 0
+      const agreed = l.agreedAmount !== null && l.agreedAmount !== undefined ? Number(l.agreedAmount) : stdFee
+      const discount = Number(l.discountAmount) || Math.max(0, stdFee - agreed)
+      if (discount <= 0) continue
+
+      const paid = Number(l.paidAmount) || 0
+      const st = l.leadStatus || 'QUALIFIED BUSINESS'
+      const prog = l.businessProgramName || l.courseProgram || 'Unspecified'
+      programSet.add(prog)
+
+      const repIdStr = l.assignedTo?.repId ? String(l.assignedTo.repId) : 'unassigned'
+      const repName = l.assignedTo?.repName || 'Unassigned'
+      const grp = repToGroupMap.get(repIdStr) || {
+        groupId: 'ungrouped',
+        groupName: 'Ungrouped',
+        managerId: '',
+        managerName: 'No Group Manager',
+      }
+
+      const setByName = l.discountSetBy?.name || repName || 'Staff'
+      const setByRole = l.discountSetBy?.role || l.assignedTo?.repRole || 'sales'
+      const setById = l.discountSetBy?.userId || repIdStr
+      const discountDate = new Date(
+        l.discountSetBy?.setAt ||
+          l.milestoneHistory?.qualifiedAt ||
+          l.milestoneHistory?.convertedAt ||
+          l.updatedAt ||
+          l.createdAt
+      )
+      const monthKey = `${discountDate.getFullYear()}-${String(discountDate.getMonth() + 1).padStart(2, '0')}`
+
+      // KPI Totals
+      kpiTotals.totalDiscountedLeads++
+      kpiTotals.totalStandardFees += stdFee
+      kpiTotals.totalAgreedAmount += agreed
+      kpiTotals.totalDiscountGiven += discount
+      if (st === 'QUALIFIED BUSINESS') {
+        kpiTotals.qualifiedCount++
+        kpiTotals.qualifiedDiscount += discount
+      } else if (st === 'CONVERTED BUSINESS') {
+        kpiTotals.convertedCount++
+        kpiTotals.convertedDiscount += discount
+      } else if (st === 'ONBOARDED BUSINESS') {
+        kpiTotals.onboardedCount++
+        kpiTotals.onboardedDiscount += discount
+      }
+
+      // Monthly bucket
+      if (!monthlyMap.has(monthKey)) {
+        monthlyMap.set(monthKey, {
+          month: monthKey,
+          leadsCount: 0,
+          qualifiedCount: 0,
+          convertedCount: 0,
+          onboardedCount: 0,
+          totalStandardFees: 0,
+          totalAgreedAmount: 0,
+          totalDiscountGiven: 0,
+        })
+      }
+      const mObj = monthlyMap.get(monthKey)
+      mObj.leadsCount++
+      if (st === 'QUALIFIED BUSINESS') mObj.qualifiedCount++
+      else if (st === 'CONVERTED BUSINESS') mObj.convertedCount++
+      else if (st === 'ONBOARDED BUSINESS') mObj.onboardedCount++
+      mObj.totalStandardFees += stdFee
+      mObj.totalAgreedAmount += agreed
+      mObj.totalDiscountGiven += discount
+
+      // By Sales Rep
+      if (!repMap.has(repIdStr)) {
+        repMap.set(repIdStr, {
+          repId: repIdStr,
+          repName,
+          groupName: grp.groupName,
+          managerName: grp.managerName,
+          leadsCount: 0,
+          qualifiedCount: 0,
+          convertedCount: 0,
+          onboardedCount: 0,
+          totalStandardFees: 0,
+          totalAgreedAmount: 0,
+          totalDiscountGiven: 0,
+        })
+      }
+      const rObj = repMap.get(repIdStr)
+      rObj.leadsCount++
+      if (st === 'QUALIFIED BUSINESS') rObj.qualifiedCount++
+      else if (st === 'CONVERTED BUSINESS') rObj.convertedCount++
+      else if (st === 'ONBOARDED BUSINESS') rObj.onboardedCount++
+      rObj.totalStandardFees += stdFee
+      rObj.totalAgreedAmount += agreed
+      rObj.totalDiscountGiven += discount
+
+      // By Group & Group Manager
+      if (!groupMap.has(grp.groupId)) {
+        groupMap.set(grp.groupId, {
+          groupId: grp.groupId,
+          groupName: grp.groupName,
+          managerName: grp.managerName,
+          leadsCount: 0,
+          qualifiedCount: 0,
+          convertedCount: 0,
+          onboardedCount: 0,
+          totalStandardFees: 0,
+          totalAgreedAmount: 0,
+          totalDiscountGiven: 0,
+        })
+      }
+      const gObj = groupMap.get(grp.groupId)
+      gObj.leadsCount++
+      if (st === 'QUALIFIED BUSINESS') gObj.qualifiedCount++
+      else if (st === 'CONVERTED BUSINESS') gObj.convertedCount++
+      else if (st === 'ONBOARDED BUSINESS') gObj.onboardedCount++
+      gObj.totalStandardFees += stdFee
+      gObj.totalAgreedAmount += agreed
+      gObj.totalDiscountGiven += discount
+
+      // By Who Gave the Discount
+      const authorKey = `${setById}_${setByName}`
+      if (!authorMap.has(authorKey)) {
+        authorMap.set(authorKey, {
+          userId: setById,
+          name: setByName,
+          role: setByRole,
+          leadsCount: 0,
+          totalStandardFees: 0,
+          totalAgreedAmount: 0,
+          totalDiscountGiven: 0,
+        })
+      }
+      const aObj = authorMap.get(authorKey)
+      aObj.leadsCount++
+      aObj.totalStandardFees += stdFee
+      aObj.totalAgreedAmount += agreed
+      aObj.totalDiscountGiven += discount
+
+      leadRows.push({
+        id: l._id.toString(),
+        fullName: l.fullName,
+        phone: l.phone || '',
+        programName: prog,
+        programVariant: l.businessProgramVariant || '',
+        leadStatus: st,
+        courseFees: stdFee,
+        agreedAmount: agreed,
+        discountAmount: discount,
+        discountPercent: roundPct(discount, stdFee),
+        paidAmount: paid,
+        balanceAmount: Math.max(0, agreed - paid),
+        assignedRepName: repName,
+        groupName: grp.groupName,
+        managerName: grp.managerName,
+        discountSetBy: {
+          userId: setById,
+          name: setByName,
+          role: setByRole,
+          setAt: discountDate,
+        },
+        date: discountDate,
+      })
+    }
+
+    kpiTotals.avgDiscountPercent = roundPct(kpiTotals.totalDiscountGiven, kpiTotals.totalStandardFees)
+
+    const monthlyTrend = Array.from(monthlyMap.values())
+      .map(m => ({ ...m, avgDiscountPercent: roundPct(m.totalDiscountGiven, m.totalStandardFees) }))
+      .sort((a, b) => b.month.localeCompare(a.month))
+
+    const bySalesRep = Array.from(repMap.values())
+      .map(r => ({ ...r, avgDiscountPercent: roundPct(r.totalDiscountGiven, r.totalStandardFees) }))
+      .sort((a, b) => b.totalDiscountGiven - a.totalDiscountGiven)
+
+    const byGroup = Array.from(groupMap.values())
+      .map(g => ({ ...g, avgDiscountPercent: roundPct(g.totalDiscountGiven, g.totalStandardFees) }))
+      .sort((a, b) => b.totalDiscountGiven - a.totalDiscountGiven)
+
+    const byDiscountAuthor = Array.from(authorMap.values())
+      .map(a => ({ ...a, avgDiscountPercent: roundPct(a.totalDiscountGiven, a.totalStandardFees) }))
+      .sort((a, b) => b.totalDiscountGiven - a.totalDiscountGiven)
+
+    res.status(200).json({
+      success: true,
+      meta: {
+        period,
+        isAdmin: scope.isAdmin,
+        isManager: scope.isManager,
+      },
+      kpiTotals,
+      monthlyTrend,
+      bySalesRep,
+      byGroup,
+      byDiscountAuthor,
+      leads: leadRows,
+      filterOptions: {
+        counselors: visibleReps.map(r => ({ id: r._id.toString(), name: r.name })),
+        teams: visibleGroups.map(g => ({ id: g._id.toString(), name: g.name })),
+        programs: Array.from(programSet).sort(),
       },
     })
   } catch (error) {

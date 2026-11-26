@@ -1,6 +1,7 @@
 import mongoose from 'mongoose'
 import Referral from '../models/Referral.js'
 import Lead from '../models/Lead.js'
+import { fetchBulkClassTeachersFromLms, normalizePhoneLast10 } from './studentController.js'
 
 function getDateRangeFilter(dateFilter, startDate, endDate) {
   const now = new Date()
@@ -116,6 +117,8 @@ export const getReferrals = async (req, res) => {
         referrerEmail: r.referrerEmail,
         referrerCourse: r.referrerCourse,
         referrerBatch: r.referrerBatch,
+        referrerClassTeacher: r.referrerClassTeacher || '',
+        referrerLmsUserId: r.referrerLmsUserId || '',
         isAlumni: Boolean(r.isAlumni),
 
         referredLeadId: liveLead._id ? liveLead._id.toString() : (r.referredLeadId ? r.referredLeadId.toString() : null),
@@ -129,6 +132,8 @@ export const getReferrals = async (req, res) => {
         isOnboarded: Boolean(r.isOnboarded || liveLead.leadStatus === 'ONBOARDED BUSINESS'),
         paidAmount: liveLead.paidAmount ?? r.paidAmount ?? 0,
         courseFees: liveLead.courseFees ?? r.courseFees ?? 0,
+        agreedAmount: liveLead.agreedAmount ?? r.agreedAmount ?? 0,
+        discountAmount: liveLead.discountAmount ?? r.discountAmount ?? 0,
         assignedTo: liveLead.assignedTo || r.assignedCounselor || null,
 
         convertedAt: r.convertedAt,
@@ -170,6 +175,49 @@ export const getReferralStats = async (req, res) => {
 
     const allMatching = await Referral.find(matchQuery).lean()
 
+    // Bulk resolve Class Teachers from fa-backend for ongoing student referrers
+    const ongoingStudentQueries = []
+    const seenStudentQueryKeys = new Set()
+    for (const ref of allMatching) {
+      if (ref.referralType === 'student' && !ref.isAlumni) {
+        const key = `${ref.referrerLmsUserId || ''}_${normalizePhoneLast10(ref.referrerPhone)}_${(ref.referrerEmail || '').toLowerCase()}`
+        if (!seenStudentQueryKeys.has(key) && (ref.referrerLmsUserId || ref.referrerPhone || ref.referrerEmail)) {
+          seenStudentQueryKeys.add(key)
+          ongoingStudentQueries.push({
+            lmsUserId: ref.referrerLmsUserId || '',
+            phone: ref.referrerPhone || '',
+            email: ref.referrerEmail || '',
+          })
+        }
+      }
+    }
+    const lmsClassTeacherLookup = ongoingStudentQueries.length
+      ? await fetchBulkClassTeachersFromLms(ongoingStudentQueries)
+      : { byId: {}, byPhone: {}, byEmail: {} }
+
+    const resolveTeacherInfo = ref => {
+      if (ref.referralType !== 'student' || ref.isAlumni) return { classTeacherName: '', classTeachers: [], batchName: ref.referrerBatch || '', lmsUserId: ref.referrerLmsUserId || '' }
+      const byId = ref.referrerLmsUserId ? lmsClassTeacherLookup.byId[ref.referrerLmsUserId] : null
+      const p10 = normalizePhoneLast10(ref.referrerPhone)
+      const byPhone = p10 ? lmsClassTeacherLookup.byPhone[p10] : null
+      const byEmail = ref.referrerEmail ? lmsClassTeacherLookup.byEmail[ref.referrerEmail.toLowerCase()] : null
+      const matched = byId || byPhone || byEmail
+      if (matched) {
+        return {
+          classTeacherName: matched.classTeacherName || ref.referrerClassTeacher || '',
+          classTeachers: Array.isArray(matched.classTeachers) ? matched.classTeachers : [],
+          batchName: matched.batchName && matched.batchName !== 'Not Assigned' ? matched.batchName : (ref.referrerBatch || ''),
+          lmsUserId: matched.lmsUserId || ref.referrerLmsUserId || '',
+        }
+      }
+      return {
+        classTeacherName: ref.referrerClassTeacher || '',
+        classTeachers: ref.referrerClassTeacher ? [{ name: ref.referrerClassTeacher, email: '', phone: '' }] : [],
+        batchName: ref.referrerBatch || '',
+        lmsUserId: ref.referrerLmsUserId || '',
+      }
+    }
+
     const totalCount = allMatching.length
     let convertedCount = 0
     let onboardedCount = 0
@@ -190,6 +238,9 @@ export const getReferralStats = async (req, res) => {
     // Leaderboard of Top Referrers
     const referrersMap = new Map()
 
+    // Leaderboard of Class Teachers (from ongoing student referrals)
+    const classTeacherMap = new Map()
+
     // Monthly Trend (Year-Month buckets)
     const monthlyTrendMap = new Map()
 
@@ -199,6 +250,7 @@ export const getReferralStats = async (req, res) => {
       const isOnb = Boolean(ref.isOnboarded || ref.leadStatus === 'ONBOARDED BUSINESS')
       const isQual = Boolean(ref.isQualified || ref.leadStatus === 'QUALIFIED BUSINESS')
       const rev = Number(ref.paidAmount) || 0
+      const teacherInfo = resolveTeacherInfo(ref)
 
       if (isConv) convertedCount++
       if (isOnb) onboardedCount++
@@ -216,7 +268,7 @@ export const getReferralStats = async (req, res) => {
       byCourse[c] = (byCourse[c] || 0) + 1
 
       // Batch demographics
-      const b = ref.referrerBatch || 'Unspecified Batch'
+      const b = teacherInfo.batchName || ref.referrerBatch || 'Unspecified Batch'
       byBatch[b] = (byBatch[b] || 0) + 1
 
       // Leaderboard
@@ -225,19 +277,60 @@ export const getReferralStats = async (req, res) => {
         referrersMap.set(refKey, {
           name: ref.referrerName,
           phone: ref.referrerPhone || '',
+          email: ref.referrerEmail || '',
+          lmsUserId: teacherInfo.lmsUserId || '',
           type: ref.referralType,
           course: ref.referrerCourse || '',
-          batch: ref.referrerBatch || '',
+          batch: teacherInfo.batchName || ref.referrerBatch || '',
+          classTeacher: teacherInfo.classTeacherName || '',
+          classTeachers: teacherInfo.classTeachers || [],
           isAlumni: Boolean(ref.isAlumni),
           totalReferrals: 0,
           convertedCount: 0,
+          onboardedCount: 0,
           totalRevenue: 0,
         })
       }
       const rObj = referrersMap.get(refKey)
       rObj.totalReferrals++
       if (isConv) rObj.convertedCount++
+      if (isOnb) rObj.onboardedCount++
       rObj.totalRevenue += rev
+      if (!rObj.classTeacher && teacherInfo.classTeacherName) {
+        rObj.classTeacher = teacherInfo.classTeacherName
+        rObj.classTeachers = teacherInfo.classTeachers
+      }
+
+      // Class Teacher Leaderboard (for ongoing student referrals)
+      if (ref.referralType === 'student' && !ref.isAlumni) {
+        const teachersList = teacherInfo.classTeachers.length
+          ? teacherInfo.classTeachers
+          : [{ id: '', name: teacherInfo.classTeacherName || 'Unassigned Class Teacher', email: '', phone: '' }]
+
+        for (const t of teachersList) {
+          const tName = t.name || 'Unassigned Class Teacher'
+          const tKey = t.id || tName.toLowerCase()
+          if (!classTeacherMap.has(tKey)) {
+            classTeacherMap.set(tKey, {
+              teacherId: t.id || '',
+              teacherName: tName,
+              teacherEmail: t.email || '',
+              teacherPhone: t.phone || '',
+              totalReferrals: 0,
+              convertedCount: 0,
+              onboardedCount: 0,
+              totalRevenue: 0,
+              studentSet: new Set(),
+            })
+          }
+          const ctObj = classTeacherMap.get(tKey)
+          ctObj.totalReferrals++
+          if (isConv) ctObj.convertedCount++
+          if (isOnb) ctObj.onboardedCount++
+          ctObj.totalRevenue += rev
+          ctObj.studentSet.add(refKey)
+        }
+      }
 
       // Monthly Trend
       const d = new Date(ref.createdAt)
@@ -257,6 +350,31 @@ export const getReferralStats = async (req, res) => {
     const leaderboard = Array.from(referrersMap.values())
       .sort((a, b) => b.convertedCount !== a.convertedCount ? b.convertedCount - a.convertedCount : b.totalReferrals - a.totalReferrals)
       .slice(0, 15)
+
+    // Ongoing students who referred (for clickable list in Referral Panel)
+    const ongoingStudentReferrers = Array.from(referrersMap.values())
+      .filter(r => r.type === 'student' && !r.isAlumni)
+      .sort((a, b) => b.totalReferrals - a.totalReferrals)
+
+    // Sort Class Teacher Leaderboard by convertedCount DESC, then totalReferrals DESC
+    const classTeacherLeaderboard = Array.from(classTeacherMap.values())
+      .map(ct => ({
+        teacherId: ct.teacherId,
+        teacherName: ct.teacherName,
+        teacherEmail: ct.teacherEmail,
+        teacherPhone: ct.teacherPhone,
+        referringStudentsCount: ct.studentSet.size,
+        totalReferrals: ct.totalReferrals,
+        convertedCount: ct.convertedCount,
+        onboardedCount: ct.onboardedCount,
+        conversionRate: ct.totalReferrals > 0 ? Math.round((ct.convertedCount / ct.totalReferrals) * 100) : 0,
+        totalRevenue: ct.totalRevenue,
+      }))
+      .sort((a, b) =>
+        b.convertedCount !== a.convertedCount
+          ? b.convertedCount - a.convertedCount
+          : b.totalReferrals - a.totalReferrals
+      )
 
     // Sort monthly trend chronologically
     const monthlyTrend = Array.from(monthlyTrendMap.values()).sort((a, b) => a.month.localeCompare(b.month))
@@ -313,6 +431,8 @@ export const getReferralStats = async (req, res) => {
         courseBreakdown,
         batchBreakdown,
         leaderboard,
+        ongoingStudentReferrers,
+        classTeacherLeaderboard,
         monthlyTrend,
       },
     })

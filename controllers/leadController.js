@@ -167,6 +167,7 @@ async function applyLifecycleUpdate(lead, payload, actor, settings) {
     businessProgramName,
     businessProgramVariant,
     courseFees,
+    agreedAmount,
     paidAmount,
     adminException,
     author,
@@ -239,12 +240,15 @@ async function applyLifecycleUpdate(lead, payload, actor, settings) {
     businessProgramName !== undefined ||
     businessProgramVariant !== undefined ||
     courseFees !== undefined ||
+    agreedAmount !== undefined ||
     paidAmount !== undefined
 
   const prevFinancial = {
     businessProgramName: lead.businessProgramName || '',
     businessProgramVariant: lead.businessProgramVariant || '',
     courseFees: lead.courseFees ?? null,
+    agreedAmount: lead.agreedAmount ?? null,
+    discountAmount: lead.discountAmount ?? 0,
     paidAmount: lead.paidAmount ?? null,
   }
 
@@ -296,14 +300,17 @@ async function applyLifecycleUpdate(lead, payload, actor, settings) {
     }
   }
 
-  // Validate FRD Section 9: disallow negative Course Fees, Paid Amount, or Receipt Amount
+  // Validate FRD Section 9: disallow negative Course Fees, Agreed Amount, Paid Amount, or Receipt Amount
   if (courseFees !== undefined && courseFees !== '' && courseFees !== null && Number(courseFees) < 0) {
     return { error: 'Course Fees cannot be negative.', statusCode: 400 }
+  }
+  if (agreedAmount !== undefined && agreedAmount !== '' && agreedAmount !== null && Number(agreedAmount) < 0) {
+    return { error: 'Total Agreed Amount cannot be negative.', statusCode: 400 }
   }
   if (paidAmount !== undefined && paidAmount !== '' && paidAmount !== null && Number(paidAmount) < 0) {
     return { error: 'Paid Amount cannot be negative.', statusCode: 400 }
   }
-  if (newReceipt && newReceipt.amount !== undefined && newReceipt.amount !== '' && Number(newReceipt.amount) < 0) {
+  if (newReceipt && newReceipt.amount !== undefined && newReceipt.amount !== '' && Number(newReceipt.amount) > 0 && Number(newReceipt.amount) < 0) {
     return { error: 'Receipt amount cannot be negative.', statusCode: 400 }
   }
 
@@ -311,6 +318,26 @@ async function applyLifecycleUpdate(lead, payload, actor, settings) {
     courseFees !== undefined && courseFees !== '' && courseFees !== null
       ? Number(courseFees)
       : lead.courseFees
+
+  const nextAgreedAmount =
+    agreedAmount !== undefined && agreedAmount !== '' && agreedAmount !== null
+      ? Number(agreedAmount)
+      : lead.agreedAmount !== null && lead.agreedAmount !== undefined
+      ? lead.agreedAmount
+      : nextCourseFees
+
+  if (
+    nextCourseFees !== null &&
+    nextCourseFees !== undefined &&
+    nextAgreedAmount !== null &&
+    nextAgreedAmount !== undefined &&
+    nextAgreedAmount > nextCourseFees
+  ) {
+    return {
+      error: `Total Agreed Amount (₹${nextAgreedAmount.toLocaleString('en-IN')}) cannot exceed Course Fees (₹${nextCourseFees.toLocaleString('en-IN')}).`,
+      statusCode: 400,
+    }
+  }
 
   const existingReceipts = Array.isArray(lead.paymentReceipts) ? lead.paymentReceipts : []
   const existingReceiptSum = existingReceipts.reduce((s, r) => s + (Number(r.amount) || 0), 0)
@@ -411,6 +438,41 @@ async function applyLifecycleUpdate(lead, payload, actor, settings) {
   if (courseFees !== undefined && courseFees !== '' && courseFees !== null && !Number.isNaN(Number(courseFees))) {
     lead.courseFees = Number(courseFees)
   }
+  if (agreedAmount !== undefined && agreedAmount !== '' && agreedAmount !== null && !Number.isNaN(Number(agreedAmount))) {
+    const newAgreed = Number(agreedAmount)
+    const prevAgreed = lead.agreedAmount
+    lead.agreedAmount = newAgreed
+    const effectiveCourseFee = Number(lead.courseFees) || 0
+    const computedDiscount = effectiveCourseFee > 0 ? Math.max(0, effectiveCourseFee - newAgreed) : 0
+    const prevDiscount = Number(lead.discountAmount) || 0
+    lead.discountAmount = computedDiscount
+    // Record who set/modified the discount whenever a discount is applied or updated
+    if (computedDiscount > 0 && (prevDiscount !== computedDiscount || prevAgreed !== newAgreed || !lead.discountSetBy?.name)) {
+      lead.discountSetBy = {
+        userId: actorInfo.userId,
+        name: actorInfo.name,
+        role: actorInfo.role,
+        setAt: new Date(),
+      }
+    } else if (computedDiscount === 0 && prevDiscount > 0) {
+      lead.discountSetBy = { userId: '', name: '', role: '', setAt: null }
+    }
+  } else if (lead.courseFees !== null && lead.courseFees !== undefined && (lead.agreedAmount === null || lead.agreedAmount === undefined)) {
+    lead.agreedAmount = Number(lead.courseFees)
+    lead.discountAmount = 0
+  } else if (lead.courseFees !== null && lead.courseFees !== undefined && lead.agreedAmount !== null && lead.agreedAmount !== undefined) {
+    // Recompute discount if courseFees changed while agreedAmount was already set
+    const computedDiscount = Math.max(0, Number(lead.courseFees) - Number(lead.agreedAmount))
+    lead.discountAmount = computedDiscount
+    if (computedDiscount > 0 && !lead.discountSetBy?.name) {
+      lead.discountSetBy = {
+        userId: actorInfo.userId,
+        name: actorInfo.name,
+        role: actorInfo.role,
+        setAt: new Date(),
+      }
+    }
+  }
 
   // Transaction-level Payment Receipts (FRD Section 8 & 9)
   lead.paymentReceipts = lead.paymentReceipts || []
@@ -463,12 +525,13 @@ async function applyLifecycleUpdate(lead, payload, actor, settings) {
     lead.paidAmount = incomingPaid
   }
 
-  // Flag Paid Amount exceeding Course Fees for Admin review (FRD Section 9)
+  // Flag Paid Amount exceeding Agreed Amount (or Course Fees) for Admin review (FRD Section 9)
+  const effectiveTargetFee =
+    lead.agreedAmount !== null && lead.agreedAmount !== undefined && lead.agreedAmount > 0
+      ? Number(lead.agreedAmount)
+      : Number(lead.courseFees) || 0
   lead.overpaidFlag = Boolean(
-    lead.courseFees !== null &&
-      lead.courseFees !== undefined &&
-      lead.courseFees > 0 &&
-      (Number(lead.paidAmount) || 0) > Number(lead.courseFees)
+    effectiveTargetFee > 0 && (Number(lead.paidAmount) || 0) > effectiveTargetFee
   )
 
   // Audit financial changes if any value changed
@@ -476,12 +539,16 @@ async function applyLifecycleUpdate(lead, payload, actor, settings) {
     businessProgramName: lead.businessProgramName || '',
     businessProgramVariant: lead.businessProgramVariant || '',
     courseFees: lead.courseFees ?? null,
+    agreedAmount: lead.agreedAmount ?? null,
+    discountAmount: lead.discountAmount ?? 0,
     paidAmount: lead.paidAmount ?? null,
   }
   const financialChanged =
     prevFinancial.businessProgramName !== newFinancial.businessProgramName ||
     prevFinancial.businessProgramVariant !== newFinancial.businessProgramVariant ||
     prevFinancial.courseFees !== newFinancial.courseFees ||
+    prevFinancial.agreedAmount !== newFinancial.agreedAmount ||
+    prevFinancial.discountAmount !== newFinancial.discountAmount ||
     prevFinancial.paidAmount !== newFinancial.paidAmount
 
   if (financialChanged) {
@@ -655,6 +722,8 @@ async function applyLifecycleUpdate(lead, payload, actor, settings) {
       businessProgramName: lead.businessProgramName || '',
       businessProgramVariant: lead.businessProgramVariant || '',
       courseFees: lead.courseFees ?? null,
+      agreedAmount: lead.agreedAmount ?? null,
+      discountAmount: lead.discountAmount ?? 0,
       paidAmount: lead.paidAmount ?? null,
     },
     updatedBy: actorInfo,
@@ -1536,6 +1605,8 @@ async function syncReferralForLead(lead) {
 
     refDoc.leadStatus = lead.leadStatus || 'NEW LEAD'
     refDoc.courseFees = Number(lead.courseFees) || 0
+    refDoc.agreedAmount = lead.agreedAmount !== null && lead.agreedAmount !== undefined ? Number(lead.agreedAmount) : (Number(lead.courseFees) || 0)
+    refDoc.discountAmount = Number(lead.discountAmount) || 0
     refDoc.paidAmount = Number(lead.paidAmount) || 0
     refDoc.isQualified = (Number(lead.paidAmount) || 0) > 0 && (Number(lead.paidAmount) || 0) < 10000
     refDoc.isConverted =

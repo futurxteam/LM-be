@@ -1,4 +1,7 @@
 import mongoose from 'mongoose'
+import bcrypt from 'bcryptjs'
+
+const BCRYPT_HASH_REGEX = /^\$2[aby]\$\d{2}\$/
 
 const userSchema = new mongoose.Schema(
   {
@@ -22,6 +25,23 @@ const userSchema = new mongoose.Schema(
   },
   { timestamps: true }
 )
+
+// Hash password automatically before saving if modified and not already a bcrypt hash
+userSchema.pre('save', async function () {
+  if (!this.isModified('password') || !this.password) return
+  if (BCRYPT_HASH_REGEX.test(this.password)) return
+  const salt = await bcrypt.genSalt(10)
+  this.password = await bcrypt.hash(this.password, salt)
+})
+
+// Compare candidate password against stored hash (with legacy plaintext fallback)
+userSchema.methods.comparePassword = async function (candidatePassword) {
+  if (!candidatePassword || !this.password) return false
+  if (BCRYPT_HASH_REGEX.test(this.password)) {
+    return bcrypt.compare(String(candidatePassword), this.password)
+  }
+  return String(candidatePassword) === String(this.password)
+}
 
 export default mongoose.models.User || mongoose.model('User', userSchema)
 

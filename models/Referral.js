@@ -33,6 +33,8 @@ const referralSchema = new mongoose.Schema(
     referrerEmail: { type: String, default: '', trim: true },
     referrerCourse: { type: String, default: '', trim: true },
     referrerBatch: { type: String, default: '', trim: true },
+    referrerClassTeacher: { type: String, default: '', trim: true },
+    referrerLmsUserId: { type: String, default: '', trim: true },
     isAlumni: { type: Boolean, default: false },
 
     // Referred Candidate snapshot
@@ -46,6 +48,8 @@ const referralSchema = new mongoose.Schema(
     isConverted: { type: Boolean, default: false },
     isOnboarded: { type: Boolean, default: false },
     courseFees: { type: Number, default: 0 },
+    agreedAmount: { type: Number, default: 0 },
+    discountAmount: { type: Number, default: 0 },
     paidAmount: { type: Number, default: 0 },
     assignedCounselor: {
       repId: { type: mongoose.Schema.Types.ObjectId, ref: 'User', default: null },

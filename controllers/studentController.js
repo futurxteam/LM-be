@@ -8,6 +8,99 @@ function sanitizePhone(phone) {
 // LMS API Configuration (Strictly via HTTP API with permanent access key)
 const FA_API_KEY = process.env.FA_LMS_API_KEY || 'fa_sec_live_9b4e7a2f1c8d5e0a3b6c9d2e4f7a1b8c'
 const FA_API_URL = process.env.FA_LMS_API_URL || 'https://fa-backend-wont.onrender.com/api/external/students/search'
+const FA_BASE_EXTERNAL_URL = FA_API_URL.replace(/\/students\/search\/?$/i, '')
+
+export function normalizePhoneLast10(phone) {
+  if (!phone) return ''
+  const digits = String(phone).replace(/\D/g, '')
+  return digits.length > 10 ? digits.slice(-10) : digits
+}
+
+/**
+ * Helper to bulk fetch assigned class teachers for students from fa-backend over HTTP API.
+ */
+export async function fetchBulkClassTeachersFromLms(students = []) {
+  if (!Array.isArray(students) || students.length === 0) {
+    return { byId: {}, byPhone: {}, byEmail: {} }
+  }
+  try {
+    const url = `${FA_BASE_EXTERNAL_URL}/students/class-teachers/bulk`
+    const response = await fetch(url, {
+      method: 'POST',
+      headers: {
+        'x-api-key': FA_API_KEY,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({ students: students.slice(0, 100) }),
+    })
+    if (!response.ok) {
+      console.warn(`[fetchBulkClassTeachersFromLms] LMS API returned ${response.status}`)
+      return { byId: {}, byPhone: {}, byEmail: {} }
+    }
+    const json = await response.json()
+    return {
+      byId: json.byId || {},
+      byPhone: json.byPhone || {},
+      byEmail: json.byEmail || {},
+    }
+  } catch (err) {
+    console.warn('⚠️ Could not bulk fetch class teachers from LMS:', err.message)
+    return { byId: {}, byPhone: {}, byEmail: {} }
+  }
+}
+
+// -------------------------------------------------------------
+// GET /api/students/class-teacher?lmsUserId=&phone=&email=
+// Fetches assigned class teacher(s) for a student via fa-backend HTTP API
+// -------------------------------------------------------------
+export const getStudentClassTeacher = async (req, res) => {
+  try {
+    const { lmsUserId = '', phone = '', email = '' } = req.query
+    if (!lmsUserId && !phone && !email) {
+      return res.status(400).json({
+        success: false,
+        message: 'Provide lmsUserId, phone, or email',
+      })
+    }
+
+    const params = new URLSearchParams()
+    if (lmsUserId) params.set('lmsUserId', lmsUserId)
+    if (phone) params.set('phone', phone)
+    if (email) params.set('email', email)
+
+    const url = `${FA_BASE_EXTERNAL_URL}/students/class-teachers?${params.toString()}`
+    const response = await fetch(url, {
+      method: 'GET',
+      headers: {
+        'x-api-key': FA_API_KEY,
+        'Content-Type': 'application/json',
+      },
+    })
+
+    if (!response.ok) {
+      return res.status(200).json({
+        success: true,
+        found: false,
+        data: null,
+        message: `LMS returned ${response.status}`,
+      })
+    }
+
+    const json = await response.json()
+    return res.status(200).json({
+      success: true,
+      found: Boolean(json.found && json.data),
+      data: json.data || null,
+    })
+  } catch (error) {
+    console.error('[getStudentClassTeacher] Error:', error)
+    return res.status(500).json({
+      success: false,
+      message: 'Failed to fetch class teacher details',
+      error: error.message,
+    })
+  }
+}
 // -------------------------------------------------------------
 // GET /api/students/lms-search
 // 1. Searches local CRM Student DB first
@@ -114,6 +207,8 @@ export const searchLmsStudents = async (req, res) => {
             email: item.email || '',
             course: item.courseName || '',
             batch: item.batchName || '',
+            classTeacher: item.classTeacherName || '',
+            classTeachers: Array.isArray(item.classTeachers) ? item.classTeachers : [],
             rollNo: item.rollNo || '',
             isAlumni: Boolean(item.isAlumni),
             status: item.status,

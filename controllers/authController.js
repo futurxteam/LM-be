@@ -1,31 +1,46 @@
-// Authentication Controller (MongoDB-backed User Authentication)
+// Authentication Controller (MongoDB-backed User Authentication with bcrypt + signed JWT)
+import jwt from 'jsonwebtoken'
 import User from '../models/User.js'
+
+const BCRYPT_HASH_REGEX = /^\$2[aby]\$\d{2}\$/
+
+function getJwtSecret() {
+  return process.env.JWT_SECRET || 'leadpulse_jwt_secret_change_in_production'
+}
 
 export const login = async (req, res) => {
   try {
-    const { email, role } = req.body || {}
+    const { email, password } = req.body || {}
     const normalizedEmail = typeof email === 'string' ? email.trim().toLowerCase() : ''
 
-    let user = null
-
-    if (normalizedEmail) {
-      user = await User.findOne({ email: normalizedEmail })
-      if (!user) {
-        return res.status(401).json({
-          success: false,
-          message: 'Invalid email or account not found.',
-        })
-      }
-    } else {
-      const searchRole = role || 'sales'
-      user = await User.findOne({ role: searchRole, active: { $ne: false } })
-      if (!user) {
-        user = await User.findOne({ active: { $ne: false } })
-      }
+    if (!normalizedEmail || !password || typeof password !== 'string') {
+      return res.status(401).json({
+        success: false,
+        message: 'Email and password are required.',
+      })
     }
 
+    const user = await User.findOne({ email: normalizedEmail })
     if (!user) {
-      return res.status(404).json({ success: false, message: 'No active users found in database' })
+      return res.status(401).json({
+        success: false,
+        message: 'Invalid email or password.',
+      })
+    }
+
+    // Verify password against bcrypt hash in DB
+    const isMatch = await user.comparePassword(password)
+    if (!isMatch) {
+      return res.status(401).json({
+        success: false,
+        message: 'Invalid email or password.',
+      })
+    }
+
+    // Transparently upgrade legacy plaintext password to bcrypt hash on successful login
+    if (!BCRYPT_HASH_REGEX.test(user.password)) {
+      user.markModified('password')
+      await user.save()
     }
 
     // Block disabled staff from logging in
@@ -37,7 +52,15 @@ export const login = async (req, res) => {
       })
     }
 
-    const token = `jwt_${user.role}_session_${user._id}`
+    const token = jwt.sign(
+      {
+        id: user._id.toString(),
+        email: user.email,
+        role: user.role,
+      },
+      getJwtSecret(),
+      { expiresIn: '7d' }
+    )
 
     return res.status(200).json({
       success: true,

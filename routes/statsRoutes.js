@@ -1,11 +1,12 @@
 import express from 'express'
-import { getStats, getAdvancedReports, getFrdReports } from '../controllers/statsController.js'
-import { requireAdmin, requireAuth } from '../middleware/authMiddleware.js'
+import { getStats, getAdvancedReports, getFrdReports, getDiscountReport } from '../controllers/statsController.js'
+import { requireAdminOrManager, requireAuth } from '../middleware/authMiddleware.js'
 
 const router = express.Router()
 
 router.get('/', getStats)
-router.get('/advanced', requireAdmin, getAdvancedReports)
+router.get('/advanced', requireAdminOrManager, getAdvancedReports)
 router.get('/frd-reports', requireAuth, getFrdReports)
+router.get('/discounts', requireAdminOrManager, getDiscountReport)
 
 export default router
