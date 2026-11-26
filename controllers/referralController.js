@@ -1,7 +1,55 @@
 import mongoose from 'mongoose'
 import Referral from '../models/Referral.js'
 import Lead from '../models/Lead.js'
+import CounselorGroup from '../models/CounselorGroup.js'
 import { fetchBulkClassTeachersFromLms, normalizePhoneLast10 } from './studentController.js'
+
+/**
+ * Scope referral queries by caller role:
+ * - Admin: full org visibility
+ * - Group Manager: strictly scoped to their managed group/team members
+ * - Sales Rep: strictly scoped to their own assigned leads
+ */
+async function buildReferralRoleScopeFilter(reqUser) {
+  if (!reqUser || reqUser.role === 'admin') return null
+  const callerId = String(reqUser.id || reqUser._id || '')
+  if (!callerId) return { _id: null }
+
+  const isManager = reqUser.role === 'manager' || Boolean(reqUser.isGroupManager)
+  let allowedRepIds = [callerId]
+
+  if (isManager) {
+    const allGroups = await CounselorGroup.find().lean()
+    const managedGroups = allGroups.filter(
+      g =>
+        (g.managerId && String(g.managerId) === callerId) ||
+        (reqUser.groupId && String(g._id) === String(reqUser.groupId))
+    )
+    const set = new Set([callerId])
+    for (const g of managedGroups) {
+      if (g.managerId) set.add(String(g.managerId))
+      for (const m of g.memberIds || []) set.add(String(m))
+    }
+    allowedRepIds = Array.from(set)
+  }
+
+  const variants = []
+  for (const rid of allowedRepIds) {
+    variants.push(rid)
+    if (mongoose.Types.ObjectId.isValid(rid)) variants.push(new mongoose.Types.ObjectId(rid))
+  }
+
+  // Also match via live Lead's assignedTo.repId so reassigned leads reflect current group ownership
+  const scopedLeads = await Lead.find({ 'assignedTo.repId': { $in: variants } }).select('_id').lean()
+  const scopedLeadIds = scopedLeads.map(l => l._id)
+
+  return {
+    $or: [
+      { 'assignedCounselor.repId': { $in: variants } },
+      ...(scopedLeadIds.length ? [{ referredLeadId: { $in: scopedLeadIds } }] : []),
+    ],
+  }
+}
 
 function getDateRangeFilter(dateFilter, startDate, endDate) {
   const now = new Date()
@@ -56,6 +104,10 @@ export const getReferrals = async (req, res) => {
     } = req.query
 
     const filter = {}
+    const roleScopeFilter = await buildReferralRoleScopeFilter(req.user)
+    if (roleScopeFilter) {
+      filter.$and = [roleScopeFilter]
+    }
 
     if (referralType && referralType !== 'all') {
       filter.referralType = referralType
@@ -81,15 +133,22 @@ export const getReferrals = async (req, res) => {
     if (search && search.trim()) {
       const q = search.trim()
       const regex = new RegExp(q.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'i')
-      filter.$or = [
-        { referrerName: regex },
-        { referrerPhone: regex },
-        { referrerCourse: regex },
-        { referrerBatch: regex },
-        { referredCandidateName: regex },
-        { referredCandidatePhone: regex },
-        { referredCandidateCourse: regex },
-      ]
+      const searchClause = {
+        $or: [
+          { referrerName: regex },
+          { referrerPhone: regex },
+          { referrerCourse: regex },
+          { referrerBatch: regex },
+          { referredCandidateName: regex },
+          { referredCandidatePhone: regex },
+          { referredCandidateCourse: regex },
+        ],
+      }
+      if (filter.$and) {
+        filter.$and.push(searchClause)
+      } else {
+        filter.$or = searchClause.$or
+      }
     }
 
     const pageNum = Math.max(1, parseInt(page, 10) || 1)
@@ -165,6 +224,10 @@ export const getReferralStats = async (req, res) => {
     const { dateFilter = 'this_year', startDate, endDate, referralType } = req.query
 
     const matchQuery = {}
+    const roleScopeFilter = await buildReferralRoleScopeFilter(req.user)
+    if (roleScopeFilter) {
+      Object.assign(matchQuery, roleScopeFilter)
+    }
     if (referralType && referralType !== 'all') {
       matchQuery.referralType = referralType
     }

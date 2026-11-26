@@ -37,6 +37,7 @@ const allowedOrigins = new Set([
   'https://sales.futureaceacademy.com',
   'http://sales.futureaceacademy.com',
   'https://www.sales.futureaceacademy.com',
+  'http://localhost:5173',
 
   ...(process.env.CORS_ORIGINS
     ? process.env.CORS_ORIGINS.split(',').map(o => o.trim()).filter(Boolean)
