@@ -2,6 +2,7 @@ import mongoose from 'mongoose'
 import Lead from '../models/Lead.js'
 import User from '../models/User.js'
 import CounselorGroup from '../models/CounselorGroup.js'
+import { wasCounselorPausedAt } from '../utils/counselorUtils.js'
 import {
   getOrCreateCrmSettings,
   LEAD_STATUSES,
@@ -1324,6 +1325,7 @@ export const getDiscountReport = async (req, res) => {
             : { $in: ['QUALIFIED BUSINESS', 'CONVERTED BUSINESS', 'ONBOARDED BUSINESS'] },
       },
       { discountAmount: { $gt: 0 } },
+      { discountApprovalStatus: { $ne: 'PENDING' } },
     ]
 
     // Scope for Group Manager
@@ -1593,6 +1595,289 @@ export const getDiscountReport = async (req, res) => {
         counselors: visibleReps.map(r => ({ id: r._id.toString(), name: r.name })),
         teams: visibleGroups.map(g => ({ id: g._id.toString(), name: g.name })),
         programs: Array.from(programSet).sort(),
+      },
+    })
+  } catch (error) {
+    res.status(500).json({ success: false, message: error.message })
+  }
+}
+
+/**
+ * Classifies an assignment timestamp (IST, UTC+5:30) into SLA priority buckets:
+ * 1. PAUSED: assigned during counselor's paused dates
+ * 2. SUNDAY_HOLIDAY: Sunday in IST (explicitly relaxed holiday SLA)
+ * 3. P1_9_TO_5: Mon-Sat 9:00 AM - 5:00 PM IST (Priority 1)
+ * 4. P2_5_TO_8: Mon-Sat 5:00 PM - 8:00 PM IST (Priority 2)
+ * 5. OTHER_HOURS: Mon-Sat 8:00 PM - 9:00 AM IST (Off-Hours)
+ */
+function classifyAssignmentWindowIST(assignedAt, repObj) {
+  if (wasCounselorPausedAt(repObj, assignedAt)) {
+    return { bucket: 'PAUSED', label: 'Paused Date (Excluded from SLA)', isHoliday: false }
+  }
+  // Convert to IST (UTC + 5h 30m)
+  const istMs = new Date(assignedAt).getTime() + 5.5 * 60 * 60 * 1000
+  const istDate = new Date(istMs)
+  const dayOfWeek = istDate.getUTCDay() // 0 = Sunday
+  const hour = istDate.getUTCHours()
+
+  if (dayOfWeek === 0) {
+    return { bucket: 'SUNDAY_HOLIDAY', label: 'Sunday • Holiday (Relaxed SLA)', isHoliday: true }
+  }
+  if (hour >= 9 && hour < 17) {
+    return { bucket: 'P1_9_TO_5', label: 'Priority 1 (9 AM – 5 PM)', isHoliday: false }
+  }
+  if (hour >= 17 && hour < 20) {
+    return { bucket: 'P2_5_TO_8', label: 'Priority 2 (5 PM – 8 PM)', isHoliday: false }
+  }
+  return { bucket: 'OTHER_HOURS', label: 'Other Hours (8 PM – 9 AM)', isHoliday: false }
+}
+
+// -------------------------------------------------------------
+// GET /api/stats/response-sla
+// Round-Robin Assignment -> First Contact SLA Report (Admin & Group Manager)
+// Buckets: P1 (9-5), P2 (5-8), Sunday Holiday (Relaxed), Other Hours, Paused Dates
+// -------------------------------------------------------------
+export const getResponseSlaReport = async (req, res) => {
+  try {
+    const scope = await resolveManagerReportScope(req.user)
+    const {
+      period = 'current_month', // 'today' | 'week' | 'current_month' | 'till_date' | 'custom'
+      fromDate = '',
+      toDate = '',
+      priorityBucket = 'All', // 'All' | 'P1_9_TO_5' | 'P2_5_TO_8' | 'SUNDAY_HOLIDAY' | 'OTHER_HOURS' | 'PAUSED'
+      contactStatus = 'All', // 'All' | 'contacted' | 'pending'
+      repId = 'All',
+      groupId = 'All',
+      page = 1,
+      limit = 30,
+    } = req.query
+
+    const pageNum = Math.max(1, parseInt(page, 10) || 1)
+    const limitNum = Math.min(100, Math.max(1, parseInt(limit, 10) || 30))
+
+    // Resolve date window
+    let startDateObj = null
+    let endDateObj = null
+    const now = new Date()
+    if (period === 'today') {
+      startDateObj = new Date(now.getFullYear(), now.getMonth(), now.getDate(), 0, 0, 0, 0)
+      endDateObj = new Date(now.getFullYear(), now.getMonth(), now.getDate(), 23, 59, 59, 999)
+    } else if (period === 'week') {
+      const diff = (now.getDay() + 6) % 7
+      startDateObj = new Date(now.getFullYear(), now.getMonth(), now.getDate() - diff, 0, 0, 0, 0)
+      endDateObj = new Date(now.getFullYear(), now.getMonth(), now.getDate(), 23, 59, 59, 999)
+    } else if (period === 'current_month') {
+      startDateObj = new Date(now.getFullYear(), now.getMonth(), 1, 0, 0, 0, 0)
+      endDateObj = new Date(now.getFullYear(), now.getMonth() + 1, 0, 23, 59, 59, 999)
+    } else if (period === 'custom' && (fromDate || toDate)) {
+      if (fromDate) startDateObj = new Date(`${fromDate}T00:00:00.000`)
+      if (toDate) endDateObj = new Date(`${toDate}T23:59:59.999`)
+    }
+
+    const [allRepsRaw, allGroupsRaw] = await Promise.all([
+      User.find({ role: { $in: ['sales', 'manager'] }, receiveLeads: { $ne: false } })
+        .sort({ name: 1 })
+        .lean(),
+      CounselorGroup.find().populate('managerId', 'name email').lean(),
+    ])
+
+    const visibleReps = scope.allowedRepIds
+      ? allRepsRaw.filter(r => scope.allowedRepIds.includes(r._id.toString()))
+      : allRepsRaw
+    const visibleGroups = scope.allowedGroupIds
+      ? allGroupsRaw.filter(g => scope.allowedGroupIds.includes(g._id.toString()))
+      : allGroupsRaw
+
+    const repObjMap = new Map(allRepsRaw.map(r => [r._id.toString(), r]))
+    const repToGroupName = new Map()
+    for (const g of allGroupsRaw) {
+      if (g.managerId) repToGroupName.set(String(g.managerId._id || g.managerId), g.name)
+      for (const m of g.memberIds || []) repToGroupName.set(String(m._id || m), g.name)
+    }
+
+    const andConditions = [{ assignmentStatus: 'ASSIGNED' }]
+    if (scope.allowedRepIds && scope.allowedRepIds.length > 0) {
+      andConditions.push({ 'assignedTo.repId': { $in: buildRepIdVariants(scope.allowedRepIds) } })
+    }
+    if (groupId && groupId !== 'All') {
+      const grp = visibleGroups.find(g => g._id.toString() === String(groupId))
+      if (grp) {
+        const gRepIds = new Set((grp.memberIds || []).map(m => String(m._id || m)))
+        if (grp.managerId) gRepIds.add(String(grp.managerId._id || grp.managerId))
+        andConditions.push({ 'assignedTo.repId': { $in: buildRepIdVariants(Array.from(gRepIds)) } })
+      }
+    }
+    if (repId && repId !== 'All') {
+      andConditions.push({ 'assignedTo.repId': { $in: buildRepIdVariants([repId]) } })
+    }
+
+    const rawLeads = await Lead.find({ $and: andConditions })
+      .select('fullName phone platform leadStatus status callAttempts assignedTo initialAdvisor steps createdAt updatedAt')
+      .sort({ 'assignedTo.assignedAt': -1, createdAt: -1 })
+      .lean()
+
+    const makeBucketStats = () => ({
+      total: 0,
+      contacted: 0,
+      pending: 0,
+      totalResponseMins: 0,
+      avgResponseMins: null,
+      contactRate: 0,
+    })
+
+    const bucketTotals = {
+      overall: makeBucketStats(),
+      P1_9_TO_5: makeBucketStats(),
+      P2_5_TO_8: makeBucketStats(),
+      SUNDAY_HOLIDAY: makeBucketStats(),
+      OTHER_HOURS: makeBucketStats(),
+      PAUSED: makeBucketStats(),
+    }
+
+    const repStatsMap = new Map()
+    for (const r of visibleReps) {
+      const rid = r._id.toString()
+      repStatsMap.set(rid, {
+        repId: rid,
+        repName: r.name,
+        groupName: repToGroupName.get(rid) || 'Ungrouped',
+        overall: makeBucketStats(),
+        P1_9_TO_5: makeBucketStats(),
+        P2_5_TO_8: makeBucketStats(),
+        SUNDAY_HOLIDAY: makeBucketStats(),
+        OTHER_HOURS: makeBucketStats(),
+        PAUSED: makeBucketStats(),
+      })
+    }
+
+    const matchedLeadRows = []
+    const nowMs = Date.now()
+
+    for (const l of rawLeads) {
+      const assignedAtRaw = l.assignedTo?.assignedAt || l.initialAdvisor?.assignedAt || l.createdAt
+      const assignedAt = assignedAtRaw ? new Date(assignedAtRaw) : null
+      if (!assignedAt || Number.isNaN(assignedAt.getTime())) continue
+      if (startDateObj && assignedAt < startDateObj) continue
+      if (endDateObj && assignedAt > endDateObj) continue
+
+      const repIdStr = l.assignedTo?.repId ? String(l.assignedTo.repId) : ''
+      const repName = l.assignedTo?.repName || 'Unassigned'
+      const repObj = repObjMap.get(repIdStr) || null
+
+      // Determine first real counselor interaction timestamp
+      const validSteps = (Array.isArray(l.steps) ? l.steps : [])
+        .filter(
+          s =>
+            s &&
+            s.selectedCategory !== 'admin_recycled' &&
+            s.selectedCategory !== 'auto_recycled' &&
+            s.updatedBy?.role !== 'system' &&
+            s.timestamp
+        )
+        .sort((a, b) => new Date(a.timestamp) - new Date(b.timestamp))
+
+      let firstContactAt = null
+      if (validSteps.length > 0) {
+        firstContactAt = new Date(validSteps[0].timestamp)
+      } else if (l.status === 'Contacted' || (l.callAttempts || 0) > 0) {
+        firstContactAt = l.updatedAt ? new Date(l.updatedAt) : null
+      }
+
+      const isContacted = Boolean(firstContactAt)
+      const responseMinutes = isContacted
+        ? Math.max(0, Math.round((firstContactAt.getTime() - assignedAt.getTime()) / 60000))
+        : null
+      const pendingMinutes = !isContacted
+        ? Math.max(0, Math.round((nowMs - assignedAt.getTime()) / 60000))
+        : null
+
+      const cls = classifyAssignmentWindowIST(assignedAt, repObj)
+
+      // Update KPI & Rep aggregates BEFORE lead-level bucket/contact filtering
+      const addToStats = stObj => {
+        stObj.total++
+        if (isContacted) {
+          stObj.contacted++
+          stObj.totalResponseMins += responseMinutes
+        } else {
+          stObj.pending++
+        }
+      }
+
+      addToStats(bucketTotals.overall)
+      addToStats(bucketTotals[cls.bucket])
+
+      if (repIdStr && repStatsMap.has(repIdStr)) {
+        const rStat = repStatsMap.get(repIdStr)
+        addToStats(rStat.overall)
+        addToStats(rStat[cls.bucket])
+      }
+
+      // Apply lead-level table filters
+      if (priorityBucket !== 'All' && cls.bucket !== priorityBucket) continue
+      if (contactStatus === 'contacted' && !isContacted) continue
+      if (contactStatus === 'pending' && isContacted) continue
+
+      matchedLeadRows.push({
+        id: l._id.toString(),
+        fullName: l.fullName,
+        phone: l.phone || '',
+        platform: l.platform || '',
+        leadStatus: l.leadStatus || 'NEW LEAD',
+        assignedRepName: repName,
+        groupName: repToGroupName.get(repIdStr) || 'Ungrouped',
+        assignedAt,
+        firstContactAt,
+        isContacted,
+        responseMinutes,
+        pendingMinutes,
+        priorityBucket: cls.bucket,
+        priorityLabel: cls.label,
+        isHoliday: cls.isHoliday,
+      })
+    }
+
+    const finalizeBucket = st => {
+      st.avgResponseMins = st.contacted > 0 ? Math.round(st.totalResponseMins / st.contacted) : null
+      st.contactRate = st.total > 0 ? Math.round((st.contacted / st.total) * 100) : 0
+      return st
+    }
+
+    Object.values(bucketTotals).forEach(finalizeBucket)
+
+    const bySalesRep = Array.from(repStatsMap.values()).map(r => {
+      finalizeBucket(r.overall)
+      finalizeBucket(r.P1_9_TO_5)
+      finalizeBucket(r.P2_5_TO_8)
+      finalizeBucket(r.SUNDAY_HOLIDAY)
+      finalizeBucket(r.OTHER_HOURS)
+      finalizeBucket(r.PAUSED)
+      return r
+    })
+
+    const totalFiltered = matchedLeadRows.length
+    const pagedLeads = matchedLeadRows.slice((pageNum - 1) * limitNum, pageNum * limitNum)
+
+    res.status(200).json({
+      success: true,
+      meta: {
+        period,
+        timezone: 'IST (UTC+5:30)',
+        isAdmin: scope.isAdmin,
+        isManager: scope.isManager,
+      },
+      kpiTotals: bucketTotals,
+      bySalesRep,
+      leads: pagedLeads,
+      pagination: {
+        page: pageNum,
+        limit: limitNum,
+        total: totalFiltered,
+        totalPages: Math.max(1, Math.ceil(totalFiltered / limitNum)),
+      },
+      filterOptions: {
+        counselors: visibleReps.map(r => ({ id: r._id.toString(), name: r.name })),
+        teams: visibleGroups.map(g => ({ id: g._id.toString(), name: g.name })),
       },
     })
   } catch (error) {

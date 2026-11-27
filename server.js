@@ -19,6 +19,7 @@ import groupRoutes from './routes/groupRoutes.js'
 import crmSettingsRoutes from './routes/crmSettingsRoutes.js'
 import studentRoutes from './routes/studentRoutes.js'
 import referralRoutes from './routes/referralRoutes.js'
+import discountApprovalRoutes from './routes/discountApprovalRoutes.js'
 import { attachUser } from './middleware/authMiddleware.js'
 import { startMetaCron } from './services/metaCron.js'
 
@@ -74,6 +75,7 @@ app.use('/api/groups', groupRoutes)
 app.use('/api/crm', crmSettingsRoutes)
 app.use('/api/students', studentRoutes)
 app.use('/api/referrals', referralRoutes)
+app.use('/api/discounts', discountApprovalRoutes)
 
 // Health Check
 app.get('/', (req, res) => {

@@ -224,6 +224,19 @@ const leadSchema = new mongoose.Schema(
     courseFees: { type: Number, default: null, min: 0 },
     agreedAmount: { type: Number, default: null, min: 0 },
     discountAmount: { type: Number, default: 0, min: 0 },
+    discountReason: { type: String, default: '' },
+    discountReasonDescription: { type: String, default: '' },
+    discountApprovalStatus: {
+      type: String,
+      enum: ['NONE', 'PENDING', 'APPROVED', 'REJECTED'],
+      default: 'NONE',
+      index: true,
+    },
+    pendingDiscountRequestId: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: 'DiscountApproval',
+      default: null,
+    },
     discountSetBy: {
       userId: { type: String, default: '' },
       name: { type: String, default: '' },

@@ -6,6 +6,7 @@ import CourseProgram, { ensureDefaultPrograms } from '../models/CourseProgram.js
 import Referral from '../models/Referral.js'
 import Student from '../models/Student.js'
 import CounselorGroup from '../models/CounselorGroup.js'
+import DiscountApproval, { DISCOUNT_REASONS } from '../models/DiscountApproval.js'
 import {
   getOrCreateCrmSettings,
   LEAD_STATUSES,
@@ -153,7 +154,7 @@ async function pickRoundRobinCounselor(excludeRepId = null) {
 /**
  * Core lifecycle transition & step logger shared across status/step/profile updates
  */
-async function applyLifecycleUpdate(lead, payload, actor, settings) {
+export async function applyLifecycleUpdate(lead, payload, actor, settings) {
   const isAdmin = actor?.role === 'admin'
   const prevStatus = lead.leadStatus || 'NEW LEAD'
 
@@ -1633,7 +1634,7 @@ export const unassignLeads = async (req, res) => {
   }
 }
 
-async function syncReferralForLead(lead) {
+export async function syncReferralForLead(lead) {
   try {
     if (!lead || !lead._id) return
     const refDoc = await Referral.findOne({ referredLeadId: lead._id })
@@ -1682,15 +1683,153 @@ export const updateLeadStatus = async (req, res) => {
 
     // Permission enforcement: Admin or Assigned Sales Counselor only
     const actor = req.user
-    if (actor && actor.role !== 'admin' && !isLeadAssignedToUser(lead, actor)) {
+    const isAdmin = actor?.role === 'admin'
+    if (actor && !isAdmin && !isLeadAssignedToUser(lead, actor)) {
       return res.status(403).json({
         success: false,
         message: 'You can only update status and add steps on leads assigned to you.',
       })
     }
 
+    // Lock guard: While a Discount Approval is PENDING, status updates are locked until Admin decides
+    if (lead.discountApprovalStatus === 'PENDING' && !isAdmin) {
+      return res.status(409).json({
+        success: false,
+        code: 'DISCOUNT_APPROVAL_PENDING',
+        message: 'This lead is locked pending Admin discount approval. Wait for Admin to approve or reject.',
+      })
+    }
+
     const settings = await getOrCreateCrmSettings()
-    const result = await applyLifecycleUpdate(lead, req.body || {}, actor, settings)
+    const body = req.body || {}
+
+    // Intercept Sales Rep / Group Manager discount requests on Qualified / Converted Business
+    // Status change & discount are held as PENDING until Admin approves
+    if (!isAdmin && body.agreedAmount !== undefined && body.agreedAmount !== '' && body.agreedAmount !== null) {
+      const matchedCat = body.categoryKey
+        ? (settings.outcomeCategories || []).find(
+            c => c.key === String(body.categoryKey).trim() && c.active !== false
+          )
+        : null
+      const targetStatus = matchedCat?.leadStatus || body.leadStatus || lead.leadStatus || 'NEW LEAD'
+
+      if (['QUALIFIED BUSINESS', 'CONVERTED BUSINESS'].includes(targetStatus)) {
+        const stdFee =
+          body.courseFees !== undefined && body.courseFees !== '' && body.courseFees !== null
+            ? Number(body.courseFees)
+            : Number(lead.courseFees) || 0
+        const reqAgreed = Number(body.agreedAmount)
+
+        if (stdFee > 0 && reqAgreed < stdFee) {
+          // Check if this exact agreedAmount was already approved on this lead
+          const alreadyApprovedSameAmount =
+            lead.discountApprovalStatus === 'APPROVED' &&
+            lead.agreedAmount !== null &&
+            Number(lead.agreedAmount) === reqAgreed &&
+            Number(lead.courseFees) === stdFee
+
+          if (!alreadyApprovedSameAmount) {
+            if (reqAgreed < 0) {
+              return res.status(400).json({ success: false, message: 'Agreed Amount cannot be negative.' })
+            }
+
+            // Validate Discount Reason
+            const cleanReason = String(body.discountReason || '').trim()
+            const cleanReasonDesc = String(body.discountReasonDescription || '').trim()
+            if (!DISCOUNT_REASONS.includes(cleanReason)) {
+              return res.status(400).json({
+                success: false,
+                message: 'Please select a valid Discount Reason (Referral, Lump Sum Discount, Spot Admission Discount, or Other).',
+              })
+            }
+            if (cleanReason === 'Other' && !cleanReasonDesc) {
+              return res.status(400).json({
+                success: false,
+                message: 'Please enter a description when Discount Reason is Other.',
+              })
+            }
+
+            // Pre-validate payment threshold rules so invalid requests fail immediately
+            const existingReceipts = Array.isArray(lead.paymentReceipts) ? lead.paymentReceipts : []
+            const existingReceiptSum = existingReceipts.reduce((s, r) => s + (Number(r.amount) || 0), 0)
+            const newRecAmt =
+              body.newReceipt && body.newReceipt.amount !== undefined && Number(body.newReceipt.amount) > 0
+                ? Number(body.newReceipt.amount)
+                : 0
+            const projectedPaid =
+              newRecAmt > 0
+                ? (existingReceipts.length > 0 ? existingReceiptSum : Number(lead.paidAmount) || 0) + newRecAmt
+                : body.paidAmount !== undefined && body.paidAmount !== ''
+                ? Number(body.paidAmount)
+                : Number(lead.paidAmount) || 0
+
+            if (targetStatus === 'CONVERTED BUSINESS' && projectedPaid < 10000) {
+              return res.status(400).json({
+                success: false,
+                message: "Can't update step: Total amount is not ₹10,000 or above for Converted Business. For advance/token payments below ₹10,000, please select Qualified.",
+              })
+            }
+            if (targetStatus === 'QUALIFIED BUSINESS' && projectedPaid >= 10000) {
+              return res.status(400).json({
+                success: false,
+                message: "Can't update step: Total amount is ₹10,000 or above. Qualified Business is strictly for advance/token payments below ₹10,000. Please select Converted Business.",
+              })
+            }
+
+            const reqDiscount = Math.max(0, stdFee - reqAgreed)
+            const approvalDoc = await DiscountApproval.create({
+              leadId: lead._id,
+              leadName: lead.fullName,
+              leadPhone: lead.phone || '',
+              previousStatus: lead.leadStatus || 'NEW LEAD',
+              targetStatus,
+              categoryKey: body.categoryKey || '',
+              programId: body.businessProgramId && mongoose.Types.ObjectId.isValid(body.businessProgramId)
+                ? body.businessProgramId
+                : lead.businessProgramId || null,
+              programName: body.businessProgramName || lead.businessProgramName || '',
+              programVariant: body.businessProgramVariant || lead.businessProgramVariant || '',
+              standardCourseFee: stdFee,
+              requestedAgreedAmount: reqAgreed,
+              requestedDiscountAmount: reqDiscount,
+              discountReason: cleanReason,
+              discountReasonDescription: cleanReasonDesc,
+              pendingPayload: body,
+              requestedBy: {
+                userId: actor?.id || actor?._id || '',
+                name: actor?.name || body.author || 'Staff',
+                role: actor?.role || 'sales',
+              },
+              groupId: lead.groupId || null,
+              status: 'PENDING',
+            })
+
+            lead.discountApprovalStatus = 'PENDING'
+            lead.pendingDiscountRequestId = approvalDoc._id
+            lead.notes = lead.notes || []
+            lead.notes.unshift({
+              text: `Discount approval requested for ${targetStatus}: Standard ₹${stdFee.toLocaleString('en-IN')} → Agreed ₹${reqAgreed.toLocaleString('en-IN')} (Discount ₹${reqDiscount.toLocaleString('en-IN')}) | Reason: ${cleanReason}${cleanReasonDesc ? ` — ${cleanReasonDesc}` : ''}. Lead locked pending Admin approval.`,
+              author: actor?.name || 'Staff',
+              status: lead.status,
+              subStatus: lead.subStatus,
+              timestamp: new Date(),
+            })
+            await lead.save()
+
+            const formatted = sanitizeLeadForRole(lead, actor?.role || 'sales')
+            return res.status(200).json({
+              success: true,
+              pendingApproval: true,
+              approvalRequest: { ...approvalDoc.toObject(), id: approvalDoc._id.toString() },
+              message: `Discount approval request submitted (Discount: ₹${reqDiscount.toLocaleString('en-IN')}). Lead status is locked as Pending until Admin approves.`,
+              lead: formatted,
+            })
+          }
+        }
+      }
+    }
+
+    const result = await applyLifecycleUpdate(lead, body, actor, settings)
     if (result.error) {
       return res.status(result.statusCode || 400).json({
         success: false,

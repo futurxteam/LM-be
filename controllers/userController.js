@@ -746,13 +746,33 @@ export const pauseOrResumeUser = async (req, res) => {
     const pausing = isPaused !== undefined ? Boolean(isPaused) : !user.isPaused
 
     user.isPaused = pausing
+    user.pauseHistory = user.pauseHistory || []
     if (pausing) {
-      user.pauseStartDate = pauseStartDate ? new Date(pauseStartDate) : new Date()
-      user.pauseEndDate = pauseEndDate ? new Date(pauseEndDate) : null
+      const startDt = pauseStartDate ? new Date(pauseStartDate) : new Date()
+      const endDt = pauseEndDate ? new Date(pauseEndDate) : null
+      user.pauseStartDate = startDt
+      user.pauseEndDate = endDt
       user.pauseReason = pauseReason || ''
       user.pausedAt = new Date()
       user.pausedBy = req.user?._id || null
+      user.pauseHistory.push({
+        startDate: startDt,
+        endDate: endDt,
+        reason: pauseReason || '',
+        pausedAt: new Date(),
+        resumedAt: null,
+      })
     } else {
+      // Close the latest open pauseHistory entry
+      for (let i = user.pauseHistory.length - 1; i >= 0; i--) {
+        if (!user.pauseHistory[i].resumedAt) {
+          user.pauseHistory[i].resumedAt = new Date()
+          if (!user.pauseHistory[i].endDate) {
+            user.pauseHistory[i].endDate = new Date()
+          }
+          break
+        }
+      }
       user.pauseStartDate = null
       user.pauseEndDate = null
       user.pauseReason = ''

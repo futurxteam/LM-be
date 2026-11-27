@@ -20,6 +20,15 @@ const userSchema = new mongoose.Schema(
     pauseReason: { type: String, default: '' },
     pausedAt: { type: Date, default: null },
     pausedBy: { type: mongoose.Schema.Types.ObjectId, ref: 'User', default: null },
+    pauseHistory: [
+      {
+        startDate: { type: Date, default: null },
+        endDate: { type: Date, default: null },
+        reason: { type: String, default: '' },
+        pausedAt: { type: Date, default: Date.now },
+        resumedAt: { type: Date, default: null },
+      },
+    ],
     groupId: { type: mongoose.Schema.Types.ObjectId, ref: 'CounselorGroup', default: null },
     isGroupManager: { type: Boolean, default: false },
     receiveLeads: { type: Boolean, default: true },
