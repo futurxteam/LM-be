@@ -33,6 +33,8 @@ const userSchema = new mongoose.Schema(
     isGroupManager: { type: Boolean, default: false },
     receiveLeads: { type: Boolean, default: true },
     telegramChatId: { type: String, default: '', trim: true },
+    telegramLinkToken: { type: String, default: '', index: true },
+    telegramLinkedAt: { type: Date, default: null },
     telegramNotificationsEnabled: { type: Boolean, default: false },
     telegramPreferences: {
       newLead: { type: Boolean, default: true },

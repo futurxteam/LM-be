@@ -10,6 +10,8 @@ import {
   getTelegramBotStatus,
   TELEGRAM_EVENT_META,
   sendTestTelegramAlert,
+  getRecentTelegramChats,
+  processSingleTelegramUpdate,
 } from '../services/telegramService.js'
 
 // -------------------------------------------------------------
@@ -231,6 +233,44 @@ export const testCrmTelegram = async (req, res) => {
     })
   } catch (error) {
     res.status(500).json({ success: false, message: error.message })
+  }
+}
+
+// -------------------------------------------------------------
+// GET /api/crm/telegram/chats - Fetch recent chats that messaged /start to the bot
+// -------------------------------------------------------------
+export const getTelegramBotChats = async (req, res) => {
+  try {
+    const result = await getRecentTelegramChats()
+    if (!result.ok) {
+      return res.status(400).json({
+        success: false,
+        message: result.error || 'Could not fetch chats from Telegram bot.',
+        botUsername: result.botUsername || '',
+        chats: [],
+      })
+    }
+    res.status(200).json({
+      success: true,
+      botUsername: result.botUsername || '',
+      chats: result.chats || [],
+    })
+  } catch (error) {
+    res.status(500).json({ success: false, message: error.message })
+  }
+}
+
+// -------------------------------------------------------------
+// POST /api/crm/telegram/webhook - Optional Telegram webhook receiver for /start link_<token>
+// -------------------------------------------------------------
+export const handleTelegramWebhook = async (req, res) => {
+  try {
+    if (req.body) {
+      await processSingleTelegramUpdate(req.body)
+    }
+    res.status(200).json({ ok: true })
+  } catch (error) {
+    res.status(200).json({ ok: true })
   }
 }
 

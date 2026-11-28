@@ -8,10 +8,15 @@ import {
   updateCourseProgram,
   deleteCourseProgram,
   testCrmTelegram,
+  getTelegramBotChats,
+  handleTelegramWebhook,
 } from '../controllers/crmSettingsController.js'
 import { requireAdmin, requireAuth } from '../middleware/authMiddleware.js'
 
 const router = express.Router()
+
+// Public Telegram Webhook endpoint (optional if webhook mode is configured)
+router.post('/telegram/webhook', handleTelegramWebhook)
 
 // Shared lifecycle options (heatTier stripped for non-admin)
 router.get('/meta', requireAuth, getCrmMeta)
@@ -20,6 +25,7 @@ router.get('/programs', requireAuth, getCoursePrograms)
 // Admin-only settings & Program Master management
 router.get('/settings', requireAdmin, getCrmSettings)
 router.put('/settings', requireAdmin, updateCrmSettings)
+router.get('/telegram/chats', requireAdmin, getTelegramBotChats)
 router.post('/telegram/test', requireAdmin, testCrmTelegram)
 router.post('/programs', requireAdmin, createCourseProgram)
 router.put('/programs/:id', requireAdmin, updateCourseProgram)

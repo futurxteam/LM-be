@@ -1,7 +1,12 @@
 // Authentication Controller (MongoDB-backed User Authentication with bcrypt + signed JWT)
 import jwt from 'jsonwebtoken'
 import User from '../models/User.js'
-import { getTelegramBotStatus, sendTestTelegramAlert } from '../services/telegramService.js'
+import {
+  getTelegramBotStatus,
+  sendTestTelegramAlert,
+  generateUserTelegramConnectLink,
+  processTelegramLinkUpdates,
+} from '../services/telegramService.js'
 
 const BCRYPT_HASH_REGEX = /^\$2[aby]\$\d{2}\$/
 
@@ -200,6 +205,43 @@ export const testMyTelegram = async (req, res) => {
     return res.status(200).json({
       success: true,
       message: 'Test message delivered to your Telegram!',
+    })
+  } catch (error) {
+    res.status(500).json({ success: false, message: error.message })
+  }
+}
+
+export const getMyTelegramConnectLink = async (req, res) => {
+  try {
+    const userId = req.user?.id || req.user?._id
+    const result = await generateUserTelegramConnectLink(userId)
+    if (!result.ok) {
+      return res.status(400).json({ success: false, message: result.error })
+    }
+    return res.status(200).json({
+      success: true,
+      connectUrl: result.connectUrl,
+      botUsername: result.botUsername,
+      alreadyLinked: result.alreadyLinked,
+    })
+  } catch (error) {
+    res.status(500).json({ success: false, message: error.message })
+  }
+}
+
+export const checkMyTelegramLinkStatus = async (req, res) => {
+  try {
+    await processTelegramLinkUpdates()
+    const userId = req.user?.id || req.user?._id
+    const freshUser = await User.findById(userId).lean()
+    if (!freshUser) {
+      return res.status(404).json({ success: false, message: 'User not found.' })
+    }
+    const formatted = formatAuthUser(freshUser)
+    return res.status(200).json({
+      success: true,
+      linked: Boolean(formatted.telegramChatId),
+      user: formatted,
     })
   } catch (error) {
     res.status(500).json({ success: false, message: error.message })

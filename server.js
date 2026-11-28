@@ -22,6 +22,7 @@ import referralRoutes from './routes/referralRoutes.js'
 import discountApprovalRoutes from './routes/discountApprovalRoutes.js'
 import { attachUser } from './middleware/authMiddleware.js'
 import { startMetaCron } from './services/metaCron.js'
+import { startTelegramLinkPoller } from './services/telegramService.js'
 
 const app = express()
 const PORT = dbConfig.port || process.env.PORT || 5000
@@ -29,6 +30,7 @@ const PORT = dbConfig.port || process.env.PORT || 5000
 // Connect to MongoDB & Start Background Services
 connectDB().then(() => {
   startMetaCron()
+  startTelegramLinkPoller()
 }).catch(err => {
   console.error('Failed to connect to DB:', err.message)
 })

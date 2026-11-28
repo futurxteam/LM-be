@@ -5,6 +5,7 @@ import {
   updateUser,
   updateUserTelegram,
   testUserTelegram,
+  createUserTelegramConnectLink,
   disableOrEnableUser,
   pauseOrResumeUser,
   getUserHistory,
@@ -24,6 +25,7 @@ router.put('/:id', updateUser)
 router.patch('/:id', updateUser)
 router.patch('/:id/telegram', updateUserTelegram)
 router.post('/:id/telegram/test', testUserTelegram)
+router.post('/:id/telegram/connect-link', createUserTelegramConnectLink)
 router.patch('/:id/disable', disableOrEnableUser)
 router.patch('/:id/pause', pauseOrResumeUser)
 router.delete('/:id', deleteUser)

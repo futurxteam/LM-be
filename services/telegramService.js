@@ -1,4 +1,5 @@
 import axios from 'axios'
+import crypto from 'crypto'
 import mongoose from 'mongoose'
 import User from '../models/User.js'
 import { getOrCreateCrmSettings, DEFAULT_TELEGRAM_TEMPLATES } from '../models/CrmSettings.js'
@@ -253,4 +254,253 @@ export async function sendTestTelegramAlert({ chatId, eventKey = 'newLead', cust
   }
 
   return sendTelegramMessage(chatId, text)
+}
+
+/**
+ * Fetches recent chats that have messaged / pressed /start on the configured Telegram bot.
+ * Lets Admins pick a user's numeric Chat ID directly inside the CRM UI.
+ */
+export async function getRecentTelegramChats() {
+  const token = getTelegramBotToken()
+  if (!token) {
+    return {
+      ok: false,
+      error: 'Telegram bot token is not configured in server .env.',
+      chats: [],
+      botUsername: '',
+    }
+  }
+
+  try {
+    const [botStatus, updatesRes] = await Promise.all([
+      getTelegramBotStatus(),
+      axios.get(`https://api.telegram.org/bot${token}/getUpdates`, {
+        params: { limit: 100 },
+        timeout: 8000,
+      }),
+    ])
+
+    if (!updatesRes.data?.ok) {
+      return {
+        ok: false,
+        error: updatesRes.data?.description || 'Failed to read updates from Telegram bot.',
+        chats: [],
+        botUsername: botStatus.botUsername || '',
+      }
+    }
+
+    const updates = Array.isArray(updatesRes.data.result) ? updatesRes.data.result : []
+    const chatMap = new Map()
+
+    for (const upd of updates) {
+      const msg =
+        upd.message ||
+        upd.edited_message ||
+        upd.channel_post ||
+        upd.my_chat_member ||
+        upd.callback_query?.message
+      const chat = msg?.chat
+      if (!chat || chat.id === undefined || chat.id === null) continue
+
+      const chatId = String(chat.id)
+      const first = chat.first_name || msg?.from?.first_name || ''
+      const last = chat.last_name || msg?.from?.last_name || ''
+      const fullName = [first, last].filter(Boolean).join(' ').trim()
+      const displayName = chat.title || fullName || (chat.username ? `@${chat.username}` : `Chat ${chatId}`)
+      const username = chat.username ? `@${chat.username}` : (msg?.from?.username ? `@${msg.from.username}` : '')
+      const lastAt = msg?.date ? new Date(msg.date * 1000).toISOString() : null
+      const lastText = typeof msg?.text === 'string' ? msg.text.slice(0, 60) : ''
+
+      const existing = chatMap.get(chatId)
+      if (!existing || (lastAt && (!existing.lastAt || lastAt > existing.lastAt))) {
+        chatMap.set(chatId, {
+          chatId,
+          displayName,
+          username,
+          type: chat.type || 'private',
+          lastText,
+          lastAt,
+        })
+      }
+    }
+
+    const chats = Array.from(chatMap.values()).sort((a, b) =>
+      String(b.lastAt || '').localeCompare(String(a.lastAt || ''))
+    )
+
+    return {
+      ok: true,
+      botUsername: botStatus.botUsername || '',
+      chats,
+    }
+  } catch (err) {
+    const rawMsg = err.response?.data?.description || err.message
+    let friendlyMsg = rawMsg
+    if (/webhook/i.test(rawMsg)) {
+      friendlyMsg = `${rawMsg} — A Telegram webhook is active on this bot, which blocks getUpdates. Delete the webhook or use @userinfobot to get Chat IDs.`
+    }
+    return {
+      ok: false,
+      error: friendlyMsg,
+      chats: [],
+      botUsername: '',
+    }
+  }
+}
+
+/**
+ * Generates (or reuses) a unique Telegram deep-link URL for a CRM user.
+ * When the user opens the link and taps Start, Telegram sends `/start link_<token>`
+ * to the bot, allowing our backend to identify their CRM account and save their Chat ID.
+ */
+export async function generateUserTelegramConnectLink(userId) {
+  const token = getTelegramBotToken()
+  if (!token) {
+    return {
+      ok: false,
+      error: 'Telegram bot token is not configured on the server.',
+    }
+  }
+
+  const user = await User.findById(userId)
+  if (!user) {
+    return { ok: false, error: 'User account not found.' }
+  }
+
+  const botStatus = await getTelegramBotStatus()
+  const cleanHandle = (
+    botStatus.botUsername ||
+    process.env.TELEGRAM_BOT_USERNAME ||
+    'Futureace_crm_Bot'
+  )
+    .replace(/^@/, '')
+    .trim()
+
+  if (!user.telegramLinkToken) {
+    user.telegramLinkToken = crypto.randomBytes(12).toString('hex')
+    await user.save()
+  }
+
+  const connectUrl = `https://t.me/${cleanHandle}?start=link_${user.telegramLinkToken}`
+  return {
+    ok: true,
+    connectUrl,
+    botUsername: `@${cleanHandle}`,
+    alreadyLinked: Boolean(String(user.telegramChatId || '').trim()),
+  }
+}
+
+/**
+ * Processes a single Telegram Update object to detect `/start link_<token>` deep-links
+ * and automatically save the user's Telegram Chat ID in MongoDB.
+ */
+export async function processSingleTelegramUpdate(upd) {
+  try {
+    const msg = upd?.message || upd?.edited_message
+    const text = typeof msg?.text === 'string' ? msg.text.trim() : ''
+    const chatId = msg?.chat?.id !== undefined && msg?.chat?.id !== null ? String(msg.chat.id) : ''
+    if (!text || !chatId) return { linked: false }
+
+    const match = text.match(/^\/start(?:@\w+)?\s+link_([a-f0-9]{8,64})$/i)
+    if (!match) return { linked: false }
+
+    const linkToken = match[1].toLowerCase()
+    const user = await User.findOne({ telegramLinkToken: linkToken })
+    if (!user) {
+      await sendTelegramMessage(
+        chatId,
+        'This connection link is invalid or has already been used. Please generate a fresh link from Futureace Academy CRM.'
+      )
+      return { linked: false }
+    }
+
+    user.telegramChatId = chatId
+    user.telegramLinkedAt = new Date()
+    user.telegramLinkToken = ''
+    await user.save()
+
+    const statusLine = user.telegramNotificationsEnabled
+      ? 'Your CRM notifications are active.'
+      : 'Your Chat ID is saved. Your Administrator can now enable your notifications from User Management.'
+
+    await sendTelegramMessage(
+      chatId,
+      `Connected successfully!\nAccount: ${user.name} (${user.email})\n${statusLine}`
+    )
+
+    console.log(`[Telegram] Auto-linked user ${user.name} (${user._id}) -> Chat ID ${chatId}`)
+    return { linked: true, userId: user._id.toString(), chatId }
+  } catch (err) {
+    console.warn('[Telegram] processSingleTelegramUpdate error:', err.message)
+    return { linked: false, error: err.message }
+  }
+}
+
+let telegramPollOffset = 0
+let telegramPollInFlight = false
+let telegramPollTimer = null
+
+/**
+ * Polls Telegram getUpdates for pending `/start link_<token>` deep-link connections.
+ * Safe to call both on an interval and on-demand when checking link status.
+ */
+export async function processTelegramLinkUpdates() {
+  const token = getTelegramBotToken()
+  if (!token || telegramPollInFlight) return { processed: 0, linkedCount: 0 }
+
+  telegramPollInFlight = true
+  try {
+    const params = { limit: 50, timeout: 0 }
+    if (telegramPollOffset > 0) {
+      params.offset = telegramPollOffset
+    }
+
+    const res = await axios.get(`https://api.telegram.org/bot${token}/getUpdates`, {
+      params,
+      timeout: 8000,
+    })
+
+    if (!res.data?.ok || !Array.isArray(res.data.result)) {
+      return { processed: 0, linkedCount: 0 }
+    }
+
+    const updates = res.data.result
+    let linkedCount = 0
+
+    for (const upd of updates) {
+      if (typeof upd.update_id === 'number' && upd.update_id >= telegramPollOffset) {
+        telegramPollOffset = upd.update_id + 1
+      }
+      const outcome = await processSingleTelegramUpdate(upd)
+      if (outcome.linked) linkedCount++
+    }
+
+    return { processed: updates.length, linkedCount }
+  } catch (err) {
+    const rawMsg = err.response?.data?.description || err.message
+    // Avoid noisy logs if bot uses a webhook instead of polling
+    if (!/webhook/i.test(rawMsg)) {
+      console.warn('[Telegram Poller] Warning:', rawMsg)
+    }
+    return { processed: 0, linkedCount: 0 }
+  } finally {
+    telegramPollInFlight = false
+  }
+}
+
+/**
+ * Starts lightweight background polling (every 5s) so `/start link_<token>` auto-links
+ * users in MongoDB even on localhost or servers without a configured Telegram webhook.
+ */
+export function startTelegramLinkPoller() {
+  if (telegramPollTimer) return
+  if (!getTelegramBotToken()) {
+    console.log('[Telegram Poller] No bot token configured; skipping background link poller.')
+    return
+  }
+  console.log('[Telegram Poller] Started background auto-link listener (5s interval).')
+  processTelegramLinkUpdates().catch(() => {})
+  telegramPollTimer = setInterval(() => {
+    processTelegramLinkUpdates().catch(() => {})
+  }, 5000)
 }

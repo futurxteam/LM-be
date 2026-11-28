@@ -2,7 +2,7 @@ import mongoose from 'mongoose'
 import User from '../models/User.js'
 import Lead from '../models/Lead.js'
 import { BUSINESS_STATUSES } from '../models/CrmSettings.js'
-import { sendTestTelegramAlert } from '../services/telegramService.js'
+import { sendTestTelegramAlert, generateUserTelegramConnectLink } from '../services/telegramService.js'
 
 const DEFAULT_USER_TELEGRAM_PREFS = {
   newLead: true,
@@ -700,6 +700,27 @@ export const testUserTelegram = async (req, res) => {
     res.status(200).json({
       success: true,
       message: `Test Telegram message delivered to ${user.name}!`,
+    })
+  } catch (error) {
+    res.status(500).json({ success: false, message: error.message })
+  }
+}
+
+// -------------------------------------------------------------
+// POST /api/users/:id/telegram/connect-link - Admin generates unique deep-link for a user
+// -------------------------------------------------------------
+export const createUserTelegramConnectLink = async (req, res) => {
+  try {
+    const { id } = req.params
+    const result = await generateUserTelegramConnectLink(id)
+    if (!result.ok) {
+      return res.status(400).json({ success: false, message: result.error })
+    }
+    res.status(200).json({
+      success: true,
+      connectUrl: result.connectUrl,
+      botUsername: result.botUsername,
+      alreadyLinked: result.alreadyLinked,
     })
   } catch (error) {
     res.status(500).json({ success: false, message: error.message })
