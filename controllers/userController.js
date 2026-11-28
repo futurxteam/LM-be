@@ -2,7 +2,7 @@ import mongoose from 'mongoose'
 import User from '../models/User.js'
 import Lead from '../models/Lead.js'
 import { BUSINESS_STATUSES } from '../models/CrmSettings.js'
-import { sendTestTelegramAlert, generateUserTelegramConnectLink } from '../services/telegramService.js'
+import { sendTestTelegramAlert, generateUserTelegramConnectLink, processTelegramLinkUpdates } from '../services/telegramService.js'
 
 const DEFAULT_USER_TELEGRAM_PREFS = {
   newLead: true,
@@ -99,6 +99,8 @@ function buildUserLeadHistoryQuery(userId) {
 export const getAllUsers = async (req, res) => {
   try {
     await ensureInitialAdvisorBackfill()
+    // Complete any pending deep-link connections (no-op if no user has a pending link token)
+    await processTelegramLinkUpdates()
 
     const { page, limit, status = 'all', role = 'all', search = '' } = req.query
     const isPaginated = page !== undefined || limit !== undefined

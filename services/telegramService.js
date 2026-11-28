@@ -293,6 +293,9 @@ export async function getRecentTelegramChats() {
     const chatMap = new Map()
 
     for (const upd of updates) {
+      // Also auto-complete any pending `/start link_<token>` deep-links found while fetching chats
+      await processSingleTelegramUpdate(upd)
+
       const msg =
         upd.message ||
         upd.edited_message ||
@@ -382,6 +385,8 @@ export async function generateUserTelegramConnectLink(userId) {
   }
 
   const connectUrl = `https://t.me/${cleanHandle}?start=link_${user.telegramLinkToken}`
+  // Start a short-lived temporary poller ONLY while waiting for this link (auto-stops when linked or after 3 min)
+  scheduleTemporaryLinkPoll(3 * 60 * 1000)
   return {
     ok: true,
     connectUrl,
@@ -439,10 +444,11 @@ export async function processSingleTelegramUpdate(upd) {
 let telegramPollOffset = 0
 let telegramPollInFlight = false
 let telegramPollTimer = null
+let telegramPollUntil = 0
 
 /**
- * Polls Telegram getUpdates for pending `/start link_<token>` deep-link connections.
- * Safe to call both on an interval and on-demand when checking link status.
+ * Checks Telegram getUpdates ONCE for pending `/start link_<token>` deep-link connections.
+ * Only calls Telegram when triggered on-demand or during an active short-lived linking window.
  */
 export async function processTelegramLinkUpdates() {
   const token = getTelegramBotToken()
@@ -450,6 +456,15 @@ export async function processTelegramLinkUpdates() {
 
   telegramPollInFlight = true
   try {
+    // Skip calling Telegram completely if no user has a pending link token
+    const hasPendingToken = await User.exists({
+      telegramLinkToken: { $exists: true, $ne: '' },
+    })
+    if (!hasPendingToken) {
+      stopTemporaryLinkPoll()
+      return { processed: 0, linkedCount: 0, skipped: true }
+    }
+
     const params = { limit: 50, timeout: 0 }
     if (telegramPollOffset > 0) {
       params.offset = telegramPollOffset
@@ -475,12 +490,19 @@ export async function processTelegramLinkUpdates() {
       if (outcome.linked) linkedCount++
     }
 
+    // Stop temporary poller immediately if no pending tokens remain
+    if (linkedCount > 0) {
+      const stillPending = await User.exists({
+        telegramLinkToken: { $exists: true, $ne: '' },
+      })
+      if (!stillPending) stopTemporaryLinkPoll()
+    }
+
     return { processed: updates.length, linkedCount }
   } catch (err) {
     const rawMsg = err.response?.data?.description || err.message
-    // Avoid noisy logs if bot uses a webhook instead of polling
     if (!/webhook/i.test(rawMsg)) {
-      console.warn('[Telegram Poller] Warning:', rawMsg)
+      console.warn('[Telegram Link Check] Warning:', rawMsg)
     }
     return { processed: 0, linkedCount: 0 }
   } finally {
@@ -488,19 +510,28 @@ export async function processTelegramLinkUpdates() {
   }
 }
 
-/**
- * Starts lightweight background polling (every 5s) so `/start link_<token>` auto-links
- * users in MongoDB even on localhost or servers without a configured Telegram webhook.
- */
-export function startTelegramLinkPoller() {
-  if (telegramPollTimer) return
-  if (!getTelegramBotToken()) {
-    console.log('[Telegram Poller] No bot token configured; skipping background link poller.')
-    return
+export function stopTemporaryLinkPoll() {
+  if (telegramPollTimer) {
+    clearInterval(telegramPollTimer)
+    telegramPollTimer = null
   }
-  console.log('[Telegram Poller] Started background auto-link listener (5s interval).')
-  processTelegramLinkUpdates().catch(() => {})
+  telegramPollUntil = 0
+}
+
+/**
+ * Starts a short-lived listener ONLY when a connect link is actively generated.
+ * Auto-stops as soon as all pending users link OR when the window expires (default 3 min).
+ */
+export function scheduleTemporaryLinkPoll(durationMs = 3 * 60 * 1000) {
+  if (!getTelegramBotToken()) return
+  telegramPollUntil = Math.max(telegramPollUntil, Date.now() + durationMs)
+  if (telegramPollTimer) return
+
   telegramPollTimer = setInterval(() => {
+    if (Date.now() > telegramPollUntil) {
+      stopTemporaryLinkPoll()
+      return
+    }
     processTelegramLinkUpdates().catch(() => {})
   }, 5000)
 }
