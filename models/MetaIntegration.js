@@ -4,6 +4,10 @@ const selectedFormSchema = new mongoose.Schema(
   {
     formId: { type: String, required: true },
     formName: { type: String, default: 'Meta Lead Form' },
+    campaignId: { type: String, default: '' },
+    campaignName: { type: String, default: '' },
+    campaignStatus: { type: String, default: '' },
+    adName: { type: String, default: '' },
     status: { type: String, default: 'ACTIVE' },
     active: { type: Boolean, default: true },
     leadsCount: { type: Number, default: 0 },
@@ -19,6 +23,7 @@ const selectedFormSchema = new mongoose.Schema(
 const metaIntegrationSchema = new mongoose.Schema(
   {
     pageId: { type: String, default: '' },
+    adAccountId: { type: String, default: '' },
     pageName: { type: String, default: 'Futureace Healthcare Academy' },
     accessToken: { type: String, default: '' },
     graphVersion: { type: String, default: 'v21.0' },

@@ -34,6 +34,183 @@ function maskToken(token) {
   return `${token.substring(0, 8)}...${token.substring(token.length - 4)}`
 }
 
+function normalizeAdAccountId(raw) {
+  const cleaned = String(raw || '').trim()
+  if (!cleaned) return ''
+  return cleaned.startsWith('act_') ? cleaned : `act_${cleaned}`
+}
+
+function extractLeadGenFormIdFromCreative(creative) {
+  if (!creative || typeof creative !== 'object') return ''
+  const spec = creative.object_story_spec || {}
+  const directId =
+    spec.link_data?.call_to_action?.value?.lead_gen_form_id ||
+    spec.video_data?.call_to_action?.value?.lead_gen_form_id ||
+    spec.template_data?.call_to_action?.value?.lead_gen_form_id
+  if (directId) return String(directId)
+
+  if (Array.isArray(spec.link_data?.child_attachments)) {
+    for (const att of spec.link_data.child_attachments) {
+      const childId = att?.call_to_action?.value?.lead_gen_form_id
+      if (childId) return String(childId)
+    }
+  }
+
+  if (Array.isArray(creative.asset_feed_spec?.call_to_actions)) {
+    for (const cta of creative.asset_feed_spec.call_to_actions) {
+      const feedId = cta?.value?.lead_gen_form_id
+      if (feedId) return String(feedId)
+    }
+  }
+
+  return ''
+}
+
+async function buildLocalCampaignLookup() {
+  const lookup = new Map()
+  try {
+    const rows = await Lead.aggregate([
+      {
+        $match: {
+          formName: { $exists: true, $nin: ['', null] },
+          campaignName: { $exists: true, $nin: ['', null] },
+        },
+      },
+      { $sort: { createdAt: -1 } },
+      {
+        $group: {
+          _id: '$formName',
+          campaignName: { $first: '$campaignName' },
+          adName: { $first: '$adName' },
+        },
+      },
+    ])
+    for (const row of rows) {
+      const key = String(row._id || '').trim().toLowerCase()
+      if (key && row.campaignName) {
+        lookup.set(key, {
+          campaignId: '',
+          campaignName: String(row.campaignName).trim(),
+          campaignStatus: '',
+          adName: String(row.adName || '').trim(),
+        })
+      }
+    }
+  } catch (err) {
+    console.warn('[Meta Campaign Lookup] Local Lead fallback skipped:', err.message)
+  }
+  return lookup
+}
+
+/**
+ * Hybrid campaign resolution for Meta Instant Forms:
+ * 1. Marketing API (/act_{adAccountId}/ads) when adAccountId is configured (maps even 0-lead forms)
+ * 2. Form latest lead (/{formId}/leads?fields=campaign_id,campaign_name,ad_name&limit=1) with Page Token
+ * 3. Local MongoDB Lead collection fallback by formName
+ */
+async function resolveFormCampaigns({ forms, token, graphVersion = 'v21.0', adAccountId = '' }) {
+  const formCampaignMap = new Map()
+  let adAccountWarning = ''
+  let adAccountMappedCount = 0
+
+  // Tier 1: Ad Account Marketing API (optional, works when token has ads_read + adAccountId is set)
+  const actId = normalizeAdAccountId(adAccountId)
+  if (actId && token) {
+    try {
+      let nextUrl = `https://graph.facebook.com/${graphVersion}/${actId}/ads`
+      let params = {
+        access_token: token,
+        fields: 'name,status,effective_status,campaign{id,name,status,effective_status},creative{object_story_spec,asset_feed_spec}',
+        limit: 200,
+      }
+      let pageCount = 0
+
+      while (nextUrl && pageCount < 3) {
+        const adsRes = await axios.get(nextUrl, {
+          params: pageCount === 0 ? params : undefined,
+          timeout: 12000,
+        })
+        const ads = adsRes.data?.data || []
+        for (const ad of ads) {
+          const fid = extractLeadGenFormIdFromCreative(ad.creative)
+          const campName = ad.campaign?.name ? String(ad.campaign.name).trim() : ''
+          if (!fid || !campName) continue
+
+          const campStatus = String(ad.campaign?.effective_status || ad.campaign?.status || '').toUpperCase()
+          const adStatus = String(ad.effective_status || ad.status || '').toUpperCase()
+          const isActive = campStatus === 'ACTIVE' && adStatus === 'ACTIVE'
+
+          const existing = formCampaignMap.get(fid)
+          if (!existing || (!existing._isActive && isActive)) {
+            if (!existing) adAccountMappedCount += 1
+            formCampaignMap.set(fid, {
+              campaignId: String(ad.campaign?.id || ''),
+              campaignName: campName,
+              campaignStatus: campStatus,
+              adName: String(ad.name || '').trim(),
+              _isActive: isActive,
+            })
+          }
+        }
+        nextUrl = adsRes.data?.paging?.next || ''
+        pageCount += 1
+      }
+    } catch (adErr) {
+      adAccountWarning = adErr.response?.data?.error?.message || adErr.message
+      console.warn('[Meta Ads API] Falling back to lead-level campaign mapping:', adAccountWarning)
+    }
+  }
+
+  // Tier 2: Latest lead from Meta Graph API for unmapped forms with >= 1 submission (Page token works!)
+  const formsNeedingLeadLookup = forms.filter(
+    f => !formCampaignMap.has(String(f.formId)) && Number(f.leadsCount || 0) > 0
+  )
+  const BATCH_SIZE = 8
+  for (let i = 0; i < formsNeedingLeadLookup.length; i += BATCH_SIZE) {
+    const batch = formsNeedingLeadLookup.slice(i, i + BATCH_SIZE)
+    const results = await Promise.allSettled(
+      batch.map(f =>
+        axios.get(`https://graph.facebook.com/${graphVersion}/${f.formId}/leads`, {
+          params: {
+            access_token: token,
+            fields: 'campaign_id,campaign_name,ad_name',
+            limit: 1,
+          },
+          timeout: 6000,
+        })
+      )
+    )
+
+    results.forEach((result, idx) => {
+      if (result.status !== 'fulfilled') return
+      const lead = result.value?.data?.data?.[0]
+      if (lead?.campaign_name) {
+        const fid = String(batch[idx].formId)
+        formCampaignMap.set(fid, {
+          campaignId: String(lead.campaign_id || ''),
+          campaignName: String(lead.campaign_name).trim(),
+          campaignStatus: '',
+          adName: String(lead.ad_name || '').trim(),
+        })
+      }
+    })
+  }
+
+  // Tier 3: Local MongoDB Lead collection fallback for any still-unmapped forms
+  const stillUnmapped = forms.filter(f => !formCampaignMap.has(String(f.formId)))
+  if (stillUnmapped.length > 0) {
+    const localLookup = await buildLocalCampaignLookup()
+    for (const f of stillUnmapped) {
+      const match = localLookup.get(String(f.formName || '').trim().toLowerCase())
+      if (match) {
+        formCampaignMap.set(String(f.formId), match)
+      }
+    }
+  }
+
+  return { formCampaignMap, adAccountMappedCount, adAccountWarning }
+}
+
 // -------------------------------------------------------------
 // GET /api/meta/config - Fetch saved settings (token masked)
 // -------------------------------------------------------------
@@ -46,11 +223,26 @@ export const getMetaConfig = async (req, res) => {
       })
     }
 
+    const rawForms = (config.selectedForms || []).map(f => (typeof f.toObject === 'function' ? f.toObject() : { ...f }))
+    const needsEnrichment = rawForms.some(f => !f.campaignName)
+    let enrichedForms = rawForms
+    if (needsEnrichment && rawForms.length > 0) {
+      const localLookup = await buildLocalCampaignLookup()
+      enrichedForms = rawForms.map(f => {
+        if (f.campaignName) return f
+        const match = localLookup.get(String(f.formName || '').trim().toLowerCase())
+        return match
+          ? { ...f, campaignName: match.campaignName, adName: f.adName || match.adName }
+          : f
+      })
+    }
+
     res.status(200).json({
       success: true,
       config: {
         id: config._id,
         pageId: config.pageId,
+        adAccountId: config.adAccountId || '',
         pageName: config.pageName,
         hasToken: !!config.accessToken,
         maskedToken: maskToken(config.accessToken),
@@ -59,7 +251,7 @@ export const getMetaConfig = async (req, res) => {
         lastSyncAt: config.lastSyncAt,
         lastSyncStatus: config.lastSyncStatus,
         lastSyncMessage: config.lastSyncMessage,
-        selectedForms: config.selectedForms || [],
+        selectedForms: enrichedForms,
         alerts: config.alerts || {},
       },
     })
@@ -73,7 +265,7 @@ export const getMetaConfig = async (req, res) => {
 // -------------------------------------------------------------
 export const saveMetaConfig = async (req, res) => {
   try {
-    const { pageId, pageName, accessToken, autoSync, syncIntervalMinutes, alerts } = req.body
+    const { pageId, adAccountId, pageName, accessToken, autoSync, syncIntervalMinutes, alerts } = req.body
 
     let config = await MetaIntegration.findOne()
     if (!config) {
@@ -81,6 +273,7 @@ export const saveMetaConfig = async (req, res) => {
     }
 
     if (pageId !== undefined) config.pageId = String(pageId).trim()
+    if (adAccountId !== undefined) config.adAccountId = String(adAccountId).trim()
     if (pageName !== undefined) config.pageName = String(pageName).trim()
     if (autoSync !== undefined) config.autoSync = Boolean(autoSync)
     if (syncIntervalMinutes !== undefined) config.syncIntervalMinutes = Number(syncIntervalMinutes)
@@ -108,6 +301,7 @@ export const saveMetaConfig = async (req, res) => {
       config: {
         id: config._id,
         pageId: config.pageId,
+        adAccountId: config.adAccountId || '',
         pageName: config.pageName,
         hasToken: !!config.accessToken,
         maskedToken: maskToken(config.accessToken),
@@ -130,11 +324,15 @@ export const saveMetaConfig = async (req, res) => {
 // -------------------------------------------------------------
 export const fetchPageForms = async (req, res) => {
   try {
-    const { pageId: reqPageId, accessToken: reqToken } = req.body
+    const { pageId: reqPageId, adAccountId: reqAdAccountId, accessToken: reqToken } = req.body
 
     const config = await MetaIntegration.findOne()
     const token = reqToken && !reqToken.includes('...') ? reqToken.trim() : config?.accessToken || process.env.META_PAGE_ACCESS_TOKEN
     const pageId = reqPageId ? String(reqPageId).trim() : config?.pageId || process.env.META_PAGE_ID
+    const adAccountId =
+      reqAdAccountId !== undefined
+        ? String(reqAdAccountId).trim()
+        : config?.adAccountId || process.env.META_AD_ACCOUNT_ID || ''
     const graphVersion = config?.graphVersion || process.env.META_GRAPH_VERSION || 'v21.0'
 
     if (!token) {
@@ -185,22 +383,54 @@ export const fetchPageForms = async (req, res) => {
       },
     })
 
-    const fetchedForms = (formsRes.data.data || []).map(f => {
-      const existing = config?.selectedForms?.find(sf => sf.formId === f.id)
+    const baseForms = (formsRes.data.data || []).map(f => {
+      const existing = config?.selectedForms?.find(sf => String(sf.formId) === String(f.id))
       return {
-        formId: f.id,
+        formId: String(f.id),
         formName: f.name || 'Untitled Lead Form',
         status: f.status || 'ACTIVE',
         active: existing ? existing.active : true, // Default active on first fetch
         leadsCount: f.leads_count || 0,
         createdTime: f.created_time,
         locale: f.locale,
+        activatedAt: existing?.activatedAt || new Date(),
+        lastSyncAt: existing?.lastSyncAt,
+        assignedGroupId: existing?.assignedGroupId || null,
+        assignedCounselorIds: existing?.assignedCounselorIds || [],
+        roundRobinIndex: Number(existing?.roundRobinIndex) || 0,
+        campaignId: existing?.campaignId || '',
+        campaignName: existing?.campaignName || '',
+        campaignStatus: existing?.campaignStatus || '',
+        adName: existing?.adName || '',
       }
     })
+
+    // Resolve Campaign names using hybrid strategy (Ad Account API -> Latest Form Lead -> Local DB)
+    const { formCampaignMap, adAccountWarning } = await resolveFormCampaigns({
+      forms: baseForms,
+      token,
+      graphVersion,
+      adAccountId,
+    })
+
+    const fetchedForms = baseForms.map(f => {
+      const resolved = formCampaignMap.get(String(f.formId))
+      if (!resolved) return f
+      return {
+        ...f,
+        campaignId: resolved.campaignId || f.campaignId || '',
+        campaignName: resolved.campaignName || f.campaignName || '',
+        campaignStatus: resolved.campaignStatus || f.campaignStatus || '',
+        adName: resolved.adName || f.adName || '',
+      }
+    })
+
+    const mappedCampaignsCount = fetchedForms.filter(f => f.campaignName).length
 
     // Update config in database
     if (config) {
       config.pageId = targetPageId
+      if (reqAdAccountId !== undefined) config.adAccountId = adAccountId
       config.selectedForms = fetchedForms
       if (reqToken && !reqToken.includes('...')) {
         config.accessToken = reqToken.trim()
@@ -211,10 +441,13 @@ export const fetchPageForms = async (req, res) => {
     res.status(200).json({
       success: true,
       pageId: targetPageId,
+      adAccountId,
       pages: discoveredPages,
       formsCount: fetchedForms.length,
+      mappedCampaignsCount,
+      adAccountWarning: adAccountWarning || undefined,
       forms: fetchedForms,
-      message: `Connected successfully! Found ${fetchedForms.length} Lead Ads form(s).`,
+      message: `Connected successfully! Found ${fetchedForms.length} Lead Ads form(s) (${mappedCampaignsCount} linked to campaigns).`,
     })
   } catch (err) {
     const errorMsg = err.response?.data?.error?.message || err.message
@@ -275,10 +508,15 @@ export const saveSelectedForms = async (req, res) => {
       return {
         formId: fid,
         formName: f.formName || 'Lead Form',
+        campaignId: f.campaignId || existing?.campaignId || '',
+        campaignName: f.campaignName || existing?.campaignName || '',
+        campaignStatus: f.campaignStatus || existing?.campaignStatus || '',
+        adName: f.adName || existing?.adName || '',
         status: f.status || 'ACTIVE',
         active: isNowActive,
         leadsCount: Number(f.leadsCount) || 0,
         activatedAt: activatedAt || now,
+        lastSyncAt: existing?.lastSyncAt,
         assignedGroupId: f.assignedGroupId || null,
         assignedCounselorIds: cleanAssignedIds,
         roundRobinIndex: Number(f.roundRobinIndex) || 0,
