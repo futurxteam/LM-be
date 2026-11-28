@@ -1,6 +1,7 @@
 import axios from 'axios'
 import MetaIntegration from '../models/MetaIntegration.js'
 import Lead from '../models/Lead.js'
+import User from '../models/User.js'
 import { extractLeadFromRow, sanitizePhone } from '../utils/leadParser.js'
 import { syncMetaLeads } from '../services/metaLeadService.js'
 
@@ -242,6 +243,10 @@ export const saveSelectedForms = async (req, res) => {
     }
 
     const existingFormsMap = new Map((config.selectedForms || []).map(f => [String(f.formId), f]))
+    const activeSalesUsers = await User.find({ role: 'sales', active: { $ne: false } })
+      .select('_id')
+      .lean()
+    const activeSalesIdSet = new Set(activeSalesUsers.map(u => u._id.toString()))
     const now = new Date()
 
     config.selectedForms = forms.map(f => {
@@ -258,6 +263,15 @@ export const saveSelectedForms = async (req, res) => {
         activatedAt = now
       }
 
+      const rawAssigned = Array.isArray(f.assignedCounselorIds)
+        ? f.assignedCounselorIds
+        : f.assignedCounselorId
+          ? [f.assignedCounselorId]
+          : []
+      const cleanAssignedIds = Array.from(
+        new Set(rawAssigned.map(String).filter(id => activeSalesIdSet.has(id)))
+      )
+
       return {
         formId: fid,
         formName: f.formName || 'Lead Form',
@@ -266,7 +280,7 @@ export const saveSelectedForms = async (req, res) => {
         leadsCount: Number(f.leadsCount) || 0,
         activatedAt: activatedAt || now,
         assignedGroupId: f.assignedGroupId || null,
-        assignedCounselorIds: Array.isArray(f.assignedCounselorIds) ? f.assignedCounselorIds : (f.assignedCounselorId ? [f.assignedCounselorId] : []),
+        assignedCounselorIds: cleanAssignedIds,
         roundRobinIndex: Number(f.roundRobinIndex) || 0,
       }
     })
