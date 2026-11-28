@@ -74,6 +74,15 @@ export async function attachUser(req, res, next) {
       groupId: userDoc.groupId ? userDoc.groupId.toString() : null,
       isGroupManager: Boolean(userDoc.isGroupManager),
       receiveLeads: userDoc.receiveLeads !== false,
+      telegramChatId: userDoc.telegramChatId || '',
+      telegramNotificationsEnabled: Boolean(userDoc.telegramNotificationsEnabled),
+      telegramPreferences: {
+        newLead: userDoc.telegramPreferences?.newLead !== false,
+        leadAssigned: userDoc.telegramPreferences?.leadAssigned !== false,
+        discountRequested: userDoc.telegramPreferences?.discountRequested !== false,
+        discountDecision: userDoc.telegramPreferences?.discountDecision !== false,
+        businessMilestone: userDoc.telegramPreferences?.businessMilestone !== false,
+      },
     }
     return next()
   } catch (err) {

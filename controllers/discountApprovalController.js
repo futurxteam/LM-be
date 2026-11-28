@@ -175,7 +175,12 @@ export const approveDiscountRequest = async (req, res) => {
     reqDoc.repNotificationRead = false
     await reqDoc.save()
 
-    // Notify requesting counselor via Telegram (non-blocking)
+    // Notify ONLY the specific counselor who requested the discount (non-blocking)
+    const recipientIds = reqDoc.requestedBy?.userId
+      ? [reqDoc.requestedBy.userId]
+      : lead.assignedTo?.repId
+        ? [lead.assignedTo.repId]
+        : []
     notifyTelegramEvent(
       'discountApproved',
       {
@@ -188,7 +193,7 @@ export const approveDiscountRequest = async (req, res) => {
         remarks: String(adminRemarks || '').trim() || 'None',
       },
       {
-        targetUserIds: [reqDoc.requestedBy?.userId, lead.assignedTo?.repId].filter(Boolean),
+        targetUserIds: recipientIds,
       }
     )
 
@@ -251,7 +256,12 @@ export const rejectDiscountRequest = async (req, res) => {
     reqDoc.repNotificationRead = false
     await reqDoc.save()
 
-    // Notify requesting counselor via Telegram (non-blocking)
+    // Notify ONLY the specific counselor who requested the discount (non-blocking)
+    const rejectRecipientIds = reqDoc.requestedBy?.userId
+      ? [reqDoc.requestedBy.userId]
+      : lead?.assignedTo?.repId
+        ? [lead.assignedTo.repId]
+        : []
     notifyTelegramEvent(
       'discountRejected',
       {
@@ -262,7 +272,7 @@ export const rejectDiscountRequest = async (req, res) => {
         remarks: String(adminRemarks || '').trim() || 'None',
       },
       {
-        targetUserIds: [reqDoc.requestedBy?.userId, lead?.assignedTo?.repId].filter(Boolean),
+        targetUserIds: rejectRecipientIds,
       }
     )
 

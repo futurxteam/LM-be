@@ -122,9 +122,17 @@ export async function sendTelegramMessage(chatId, text) {
     }
     return { ok: false, error: res.data?.description || 'Telegram API rejected the message.' }
   } catch (err) {
-    const errMsg = err.response?.data?.description || err.message
-    console.warn(`[Telegram] Failed sending to ${cleanChatId}:`, errMsg)
-    return { ok: false, error: errMsg }
+    const rawMsg = err.response?.data?.description || err.message
+    let friendlyMsg = rawMsg
+    if (/chat not found/i.test(rawMsg)) {
+      friendlyMsg = `${rawMsg} — Verify the numeric Chat ID and ensure the user has opened the bot on Telegram and tapped Start (/start).`
+    } else if (/bot was blocked by the user/i.test(rawMsg)) {
+      friendlyMsg = `${rawMsg} — The user blocked the bot on Telegram and must unblock it and send /start.`
+    } else if (/unauthorized/i.test(rawMsg)) {
+      friendlyMsg = `${rawMsg} — Check TELEGRAM_BOT_TOKEN in server environment variables.`
+    }
+    console.warn(`[Telegram] Failed sending to ${cleanChatId}:`, rawMsg)
+    return { ok: false, error: friendlyMsg }
   }
 }
 

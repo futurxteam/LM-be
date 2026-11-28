@@ -1904,7 +1904,7 @@ export const updateLeadStatus = async (req, res) => {
     await lead.save()
     await syncReferralForLead(lead)
 
-    // Alert Admins via Telegram when a lead reaches a Business Milestone
+    // Alert Admins + the lead's assigned counselor (if another user updated it) on Business Milestone
     if (
       BUSINESS_STATUSES.includes(lead.leadStatus) &&
       lead.leadStatus !== prevStatusBeforeUpdate
@@ -1913,6 +1913,10 @@ export const updateLeadStatus = async (req, res) => {
         lead.agreedAmount !== null && lead.agreedAmount !== undefined
           ? lead.agreedAmount
           : lead.courseFees
+      const milestoneTargetUsers =
+        lead.assignedTo?.repId && String(lead.assignedTo.repId) !== String(actor?.id || actor?._id || '')
+          ? [lead.assignedTo.repId.toString()]
+          : []
       notifyTelegramEvent(
         'businessMilestone',
         {
@@ -1924,7 +1928,7 @@ export const updateLeadStatus = async (req, res) => {
           paidAmount: formatMoneyIN(lead.paidAmount),
           assignedTo: lead.assignedTo?.repName || actor?.name || 'Unassigned',
         },
-        { notifyAdmins: true }
+        { notifyAdmins: true, targetUserIds: milestoneTargetUsers }
       )
     }
 
