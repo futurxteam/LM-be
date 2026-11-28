@@ -100,15 +100,29 @@ async function fetchAllPages(url, params = {}, token) {
 export async function syncMetaLeads(manualToken, manualPageId, forceFullSync = false) {
   const config = await MetaIntegration.findOne()
 
-  const token = manualToken || config?.accessToken || process.env.META_PAGE_ACCESS_TOKEN
+  const baseToken = manualToken || config?.accessToken || process.env.META_PAGE_ACCESS_TOKEN
   const pageId = manualPageId || config?.pageId || process.env.META_PAGE_ID
   const graphVersion = config?.graphVersion || process.env.META_GRAPH_VERSION || 'v21.0'
 
-  if (!token || !pageId) {
+  if (!baseToken || !pageId) {
     throw new Error('Meta Page Access Token and Page ID are required to sync leads.')
   }
 
   const GRAPH_URL = `https://graph.facebook.com/${graphVersion}`
+
+  // Automatically exchange User/System User token for Page Access Token when needed
+  let token = baseToken
+  try {
+    const ptRes = await axios.get(`${GRAPH_URL}/${pageId}`, {
+      params: { access_token: baseToken, fields: 'access_token' },
+      timeout: 8000,
+    })
+    if (ptRes.data?.access_token) {
+      token = ptRes.data.access_token
+    }
+  } catch (err) {
+    // Already a Page Access Token
+  }
 
   // 1. Identify strictly enabled (active: true) forms — never auto-sync disabled forms
   const activeForms = (config?.selectedForms || []).filter(f => f.active)

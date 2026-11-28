@@ -8,15 +8,35 @@ import { syncMetaLeads } from '../services/metaLeadService.js'
 /**
  * Automatically subscribes a Facebook Page to the Meta App for real-time leadgen webhooks
  */
+export async function resolvePageToken(baseToken, pageId, graphVersion = 'v21.0') {
+  if (!baseToken || !pageId) return baseToken
+  try {
+    const res = await axios.get(`https://graph.facebook.com/${graphVersion}/${pageId}`, {
+      params: {
+        access_token: baseToken,
+        fields: 'access_token',
+      },
+      timeout: 8000,
+    })
+    if (res.data?.access_token) {
+      return res.data.access_token
+    }
+  } catch (err) {
+    // Already a Page Access Token or cannot exchange; fall back to baseToken
+  }
+  return baseToken
+}
+
 export async function ensurePageSubscribed(pageId, token, graphVersion = 'v21.0') {
   if (!pageId || !token) return false
   try {
+    const pageToken = await resolvePageToken(token, pageId, graphVersion)
     const res = await axios.post(
       `https://graph.facebook.com/${graphVersion}/${pageId}/subscribed_apps`,
       null,
       {
         params: {
-          access_token: token,
+          access_token: pageToken,
           subscribed_fields: 'leadgen',
         },
       }
@@ -104,21 +124,25 @@ async function buildLocalCampaignLookup() {
 
 /**
  * Hybrid campaign resolution for Meta Instant Forms:
- * 1. Marketing API (/act_{adAccountId}/ads) when adAccountId is configured (maps even 0-lead forms)
- * 2. Form latest lead (/{formId}/leads?fields=campaign_id,campaign_name,ad_name&limit=1) with Page Token
+ * 1. Marketing API (/act_{adAccountId}/ads) using User/System User token when adAccountId is configured
+ * 2. Form leads (/{formId}/leads?fields=id,campaign_name,ad_name,adset_name,is_organic&limit=5) using Page Token
  * 3. Local MongoDB Lead collection fallback by formName
  */
-async function resolveFormCampaigns({ forms, token, graphVersion = 'v21.0', adAccountId = '' }) {
+async function resolveFormCampaigns({ forms, token, pageToken, graphVersion = 'v21.0', adAccountId = '' }) {
   const formCampaignMap = new Map()
   let adAccountWarning = ''
+  let leadLookupWarning = ''
   let adAccountMappedCount = 0
+  let leadLookupMappedCount = 0
 
-  // Tier 1: Ad Account Marketing API (optional, works when token has ads_read + adAccountId is set)
+  const effectivePageToken = pageToken || token
+
+  // Tier 1: Ad Account Marketing API (optional, works when token is User/System token with ads_read + adAccountId is set)
   const actId = normalizeAdAccountId(adAccountId)
   if (actId && token) {
     try {
       let nextUrl = `https://graph.facebook.com/${graphVersion}/${actId}/ads`
-      let params = {
+      const params = {
         access_token: token,
         fields: 'name,status,effective_status,campaign{id,name,status,effective_status},creative{object_story_spec,asset_feed_spec}',
         limit: 200,
@@ -161,7 +185,7 @@ async function resolveFormCampaigns({ forms, token, graphVersion = 'v21.0', adAc
     }
   }
 
-  // Tier 2: Latest lead from Meta Graph API for unmapped forms with >= 1 submission (Page token works!)
+  // Tier 2: Latest leads from Meta Graph API for unmapped forms with >= 1 submission (does NOT import into CRM pool!)
   const formsNeedingLeadLookup = forms.filter(
     f => !formCampaignMap.has(String(f.formId)) && Number(f.leadsCount || 0) > 0
   )
@@ -172,25 +196,33 @@ async function resolveFormCampaigns({ forms, token, graphVersion = 'v21.0', adAc
       batch.map(f =>
         axios.get(`https://graph.facebook.com/${graphVersion}/${f.formId}/leads`, {
           params: {
-            access_token: token,
-            fields: 'campaign_id,campaign_name,ad_name',
-            limit: 1,
+            access_token: effectivePageToken,
+            fields: 'id,campaign_name,ad_name,adset_name,is_organic',
+            limit: 5,
           },
-          timeout: 6000,
+          timeout: 8000,
         })
       )
     )
 
     results.forEach((result, idx) => {
-      if (result.status !== 'fulfilled') return
-      const lead = result.value?.data?.data?.[0]
-      if (lead?.campaign_name) {
+      if (result.status !== 'fulfilled') {
+        if (!leadLookupWarning) {
+          leadLookupWarning =
+            result.reason?.response?.data?.error?.message || result.reason?.message || 'Lead lookup failed'
+        }
+        return
+      }
+      const leads = result.value?.data?.data || []
+      const leadWithCampaign = leads.find(l => l?.campaign_name && String(l.campaign_name).trim())
+      if (leadWithCampaign) {
         const fid = String(batch[idx].formId)
+        leadLookupMappedCount += 1
         formCampaignMap.set(fid, {
-          campaignId: String(lead.campaign_id || ''),
-          campaignName: String(lead.campaign_name).trim(),
+          campaignId: '',
+          campaignName: String(leadWithCampaign.campaign_name).trim(),
           campaignStatus: '',
-          adName: String(lead.ad_name || '').trim(),
+          adName: String(leadWithCampaign.ad_name || '').trim(),
         })
       }
     })
@@ -208,7 +240,13 @@ async function resolveFormCampaigns({ forms, token, graphVersion = 'v21.0', adAc
     }
   }
 
-  return { formCampaignMap, adAccountMappedCount, adAccountWarning }
+  return {
+    formCampaignMap,
+    adAccountMappedCount,
+    leadLookupMappedCount,
+    adAccountWarning,
+    leadLookupWarning,
+  }
 }
 
 // -------------------------------------------------------------
@@ -373,17 +411,31 @@ export const fetchPageForms = async (req, res) => {
       })
     }
 
-    // Query Graph API for Lead Gen Forms
-    const formsUrl = `https://graph.facebook.com/${graphVersion}/${targetPageId}/leadgen_forms`
-    const formsRes = await axios.get(formsUrl, {
-      params: {
-        access_token: token,
-        fields: 'id,name,status,leads_count,created_time,locale',
-        limit: 100,
-      },
-    })
+    // Resolve Page Access Token automatically if a User/System User token was supplied
+    const pageToken = await resolvePageToken(token, targetPageId, graphVersion)
 
-    const baseForms = (formsRes.data.data || []).map(f => {
+    // Query Graph API for Lead Gen Forms (paginated up to 3 pages / 300 forms)
+    const rawMetaForms = []
+    let nextFormsUrl = `https://graph.facebook.com/${graphVersion}/${targetPageId}/leadgen_forms`
+    let formsPageCount = 0
+    while (nextFormsUrl && formsPageCount < 3) {
+      const formsRes = await axios.get(nextFormsUrl, {
+        params:
+          formsPageCount === 0
+            ? {
+                access_token: pageToken,
+                fields: 'id,name,status,leads_count,created_time,locale',
+                limit: 100,
+              }
+            : undefined,
+        timeout: 12000,
+      })
+      rawMetaForms.push(...(formsRes.data?.data || []))
+      nextFormsUrl = formsRes.data?.paging?.next || ''
+      formsPageCount += 1
+    }
+
+    const baseForms = rawMetaForms.map(f => {
       const existing = config?.selectedForms?.find(sf => String(sf.formId) === String(f.id))
       return {
         formId: String(f.id),
@@ -405,10 +457,17 @@ export const fetchPageForms = async (req, res) => {
       }
     })
 
-    // Resolve Campaign names using hybrid strategy (Ad Account API -> Latest Form Lead -> Local DB)
-    const { formCampaignMap, adAccountWarning } = await resolveFormCampaigns({
+    // Resolve Campaign names using hybrid strategy (Ad Account API -> Meta Form Leads -> Local DB)
+    const {
+      formCampaignMap,
+      adAccountMappedCount,
+      leadLookupMappedCount,
+      adAccountWarning,
+      leadLookupWarning,
+    } = await resolveFormCampaigns({
       forms: baseForms,
       token,
+      pageToken,
       graphVersion,
       adAccountId,
     })
@@ -427,16 +486,15 @@ export const fetchPageForms = async (req, res) => {
 
     const mappedCampaignsCount = fetchedForms.filter(f => f.campaignName).length
 
-    // Update config in database
-    if (config) {
-      config.pageId = targetPageId
-      if (reqAdAccountId !== undefined) config.adAccountId = adAccountId
-      config.selectedForms = fetchedForms
-      if (reqToken && !reqToken.includes('...')) {
-        config.accessToken = reqToken.trim()
-      }
-      await config.save()
+    // Update or create config in database so resolved campaign names persist across sessions
+    const targetConfig = config || new MetaIntegration()
+    targetConfig.pageId = targetPageId
+    if (reqAdAccountId !== undefined) targetConfig.adAccountId = adAccountId
+    targetConfig.selectedForms = fetchedForms
+    if (reqToken && !reqToken.includes('...')) {
+      targetConfig.accessToken = reqToken.trim()
     }
+    await targetConfig.save()
 
     res.status(200).json({
       success: true,
@@ -445,7 +503,10 @@ export const fetchPageForms = async (req, res) => {
       pages: discoveredPages,
       formsCount: fetchedForms.length,
       mappedCampaignsCount,
+      adAccountMappedCount,
+      leadLookupMappedCount,
       adAccountWarning: adAccountWarning || undefined,
+      leadLookupWarning: leadLookupWarning || undefined,
       forms: fetchedForms,
       message: `Connected successfully! Found ${fetchedForms.length} Lead Ads form(s) (${mappedCampaignsCount} linked to campaigns).`,
     })
@@ -654,12 +715,15 @@ export const previewFormLeads = async (req, res) => {
     }
 
     const config = await MetaIntegration.findOne()
-    const token = config?.accessToken || process.env.META_PAGE_ACCESS_TOKEN
+    const baseToken = config?.accessToken || process.env.META_PAGE_ACCESS_TOKEN
+    const pageId = config?.pageId || process.env.META_PAGE_ID
     const graphVersion = config?.graphVersion || process.env.META_GRAPH_VERSION || 'v21.0'
 
-    if (!token) {
+    if (!baseToken) {
       return res.status(400).json({ success: false, message: 'No Meta Page Access Token configured' })
     }
+
+    const token = await resolvePageToken(baseToken, pageId, graphVersion)
 
     const formConfig = config?.selectedForms?.find(f => f.formId === String(formId))
     const formName = formConfig?.formName || 'Meta Lead Form'
