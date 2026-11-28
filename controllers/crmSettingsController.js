@@ -3,8 +3,14 @@ import {
   getOrCreateCrmSettings,
   LEAD_STATUSES,
   INQUIRY_INTENT_STATUSES,
+  DEFAULT_TELEGRAM_TEMPLATES,
   deriveHeatTierFromStatus,
 } from '../models/CrmSettings.js'
+import {
+  getTelegramBotStatus,
+  TELEGRAM_EVENT_META,
+  sendTestTelegramAlert,
+} from '../services/telegramService.js'
 
 // -------------------------------------------------------------
 // GET /api/crm/meta - Shared lifecycle options for Admin & Sales
@@ -60,14 +66,18 @@ export const getCrmMeta = async (req, res) => {
 // -------------------------------------------------------------
 export const getCrmSettings = async (req, res) => {
   try {
-    const [settings, programs] = await Promise.all([
+    const [settings, programs, telegramBotStatus] = await Promise.all([
       getOrCreateCrmSettings(),
       ensureDefaultPrograms(),
+      getTelegramBotStatus(),
     ])
     res.status(200).json({
       success: true,
       settings,
       programs,
+      telegramBotStatus,
+      defaultTelegramTemplates: DEFAULT_TELEGRAM_TEMPLATES,
+      telegramEventMeta: TELEGRAM_EVENT_META,
     })
   } catch (error) {
     res.status(500).json({ success: false, message: error.message })
@@ -88,6 +98,7 @@ export const updateCrmSettings = async (req, res) => {
       allowSalesFinancialEdit,
       outcomeCategories,
       lostReasons,
+      telegramSettings,
     } = req.body || {}
 
     if (maxLostCycles !== undefined) {
@@ -138,11 +149,85 @@ export const updateCrmSettings = async (req, res) => {
       settings.lostReasons = lostReasons.map(r => String(r || '').trim()).filter(Boolean)
     }
 
+    if (telegramSettings && typeof telegramSettings === 'object') {
+      const currentTg = settings.telegramSettings || {}
+      const nextEvents = {
+        newLead: currentTg.events?.newLead !== false,
+        leadAssigned: currentTg.events?.leadAssigned !== false,
+        discountRequested: currentTg.events?.discountRequested !== false,
+        discountApproved: currentTg.events?.discountApproved !== false,
+        discountRejected: currentTg.events?.discountRejected !== false,
+        businessMilestone: currentTg.events?.businessMilestone !== false,
+      }
+      if (telegramSettings.events && typeof telegramSettings.events === 'object') {
+        Object.keys(nextEvents).forEach(k => {
+          if (telegramSettings.events[k] !== undefined) {
+            nextEvents[k] = Boolean(telegramSettings.events[k])
+          }
+        })
+      }
+
+      const nextTemplates = {
+        ...DEFAULT_TELEGRAM_TEMPLATES,
+        ...(currentTg.templates?.toObject ? currentTg.templates.toObject() : (currentTg.templates || {})),
+      }
+      if (telegramSettings.templates && typeof telegramSettings.templates === 'object') {
+        Object.keys(DEFAULT_TELEGRAM_TEMPLATES).forEach(k => {
+          if (telegramSettings.templates[k] !== undefined) {
+            const cleaned = String(telegramSettings.templates[k] || '').trim()
+            nextTemplates[k] = cleaned || DEFAULT_TELEGRAM_TEMPLATES[k]
+          }
+        })
+      }
+
+      settings.telegramSettings = {
+        enabled:
+          telegramSettings.enabled !== undefined
+            ? Boolean(telegramSettings.enabled)
+            : currentTg.enabled !== false,
+        events: nextEvents,
+        templates: nextTemplates,
+      }
+      settings.markModified('telegramSettings')
+    }
+
     await settings.save()
     res.status(200).json({
       success: true,
-      message: 'CRM lifecycle & recycle settings updated successfully.',
+      message: 'CRM settings updated successfully.',
       settings,
+    })
+  } catch (error) {
+    res.status(500).json({ success: false, message: error.message })
+  }
+}
+
+// -------------------------------------------------------------
+// POST /api/crm/telegram/test - Admin test Telegram template delivery
+// -------------------------------------------------------------
+export const testCrmTelegram = async (req, res) => {
+  try {
+    const { chatId, eventKey = 'newLead', customTemplate = '' } = req.body || {}
+    if (!chatId || !String(chatId).trim()) {
+      return res.status(400).json({
+        success: false,
+        message: 'Please enter a Telegram Chat ID to send a test alert.',
+      })
+    }
+    const result = await sendTestTelegramAlert({
+      chatId: String(chatId).trim(),
+      eventKey,
+      customTemplate,
+    })
+    if (!result.ok) {
+      return res.status(400).json({
+        success: false,
+        message: `Telegram delivery failed: ${result.error}`,
+      })
+    }
+    res.status(200).json({
+      success: true,
+      message: 'Test Telegram notification sent successfully!',
     })
   } catch (error) {
     res.status(500).json({ success: false, message: error.message })

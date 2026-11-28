@@ -11,6 +11,7 @@ function getJwtSecret() {
  */
 export async function attachUser(req, res, next) {
   try {
+    req.authError = null
     const authHeader = req.headers.authorization || ''
     const token = authHeader.startsWith('Bearer ') ? authHeader.slice(7).trim() : ''
 
@@ -24,23 +25,35 @@ export async function attachUser(req, res, next) {
       decoded = jwt.verify(token, getJwtSecret())
     } catch (verifyErr) {
       req.user = null
+      req.authError = {
+        code: 'INVALID_TOKEN',
+        message: 'Session expired or invalid token. Please log in again.',
+      }
       return next()
     }
 
     const userId = decoded?.id
     if (!userId || !mongoose.Types.ObjectId.isValid(userId)) {
       req.user = null
+      req.authError = {
+        code: 'INVALID_TOKEN',
+        message: 'Invalid session token. Please log in again.',
+      }
       return next()
     }
 
     const userDoc = await User.findById(userId).lean()
     if (!userDoc) {
       req.user = null
+      req.authError = {
+        code: 'USER_NOT_FOUND',
+        message: 'Your account no longer exists. Please log in again.',
+      }
       return next()
     }
 
-    // Immediately reject active sessions of disabled accounts on any non-auth route
-    if (userDoc.active === false && !req.path.startsWith('/api/auth')) {
+    // Immediately reject active sessions of disabled accounts on any non-login route
+    if (userDoc.active === false && !req.path.startsWith('/api/auth/login')) {
       return res.status(403).json({
         success: false,
         code: 'ACCOUNT_DISABLED',
@@ -55,14 +68,21 @@ export async function attachUser(req, res, next) {
       email: userDoc.email,
       role: userDoc.role,
       title: userDoc.title,
+      specialty: userDoc.specialty,
+      avatar: userDoc.avatar,
       active: userDoc.active !== false,
       groupId: userDoc.groupId ? userDoc.groupId.toString() : null,
       isGroupManager: Boolean(userDoc.isGroupManager),
+      receiveLeads: userDoc.receiveLeads !== false,
     }
     return next()
   } catch (err) {
     console.warn('attachUser middleware warning:', err.message)
     req.user = null
+    req.authError = {
+      code: 'AUTH_ERROR',
+      message: 'Authentication check failed. Please log in again.',
+    }
     return next()
   }
 }
@@ -71,7 +91,8 @@ export function requireAuth(req, res, next) {
   if (!req.user) {
     return res.status(401).json({
       success: false,
-      message: 'Authentication required. Please log in again.',
+      code: req.authError?.code || 'UNAUTHORIZED',
+      message: req.authError?.message || 'Authentication required. Please log in again.',
     })
   }
   return next()
@@ -81,7 +102,8 @@ export function requireAdmin(req, res, next) {
   if (!req.user) {
     return res.status(401).json({
       success: false,
-      message: 'Authentication required.',
+      code: req.authError?.code || 'UNAUTHORIZED',
+      message: req.authError?.message || 'Authentication required. Please log in again.',
     })
   }
   if (req.user.role !== 'admin') {
@@ -97,7 +119,8 @@ export function requireAdminOrManager(req, res, next) {
   if (!req.user) {
     return res.status(401).json({
       success: false,
-      message: 'Authentication required.',
+      code: req.authError?.code || 'UNAUTHORIZED',
+      message: req.authError?.message || 'Authentication required. Please log in again.',
     })
   }
   if (req.user.role !== 'admin' && req.user.role !== 'manager' && !req.user.isGroupManager) {

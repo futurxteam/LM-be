@@ -32,6 +32,15 @@ const userSchema = new mongoose.Schema(
     groupId: { type: mongoose.Schema.Types.ObjectId, ref: 'CounselorGroup', default: null },
     isGroupManager: { type: Boolean, default: false },
     receiveLeads: { type: Boolean, default: true },
+    telegramChatId: { type: String, default: '', trim: true },
+    telegramNotificationsEnabled: { type: Boolean, default: false },
+    telegramPreferences: {
+      newLead: { type: Boolean, default: true },
+      leadAssigned: { type: Boolean, default: true },
+      discountRequested: { type: Boolean, default: true },
+      discountDecision: { type: Boolean, default: true },
+      businessMilestone: { type: Boolean, default: true },
+    },
   },
   { timestamps: true }
 )

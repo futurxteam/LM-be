@@ -3,6 +3,7 @@ import DiscountApproval from '../models/DiscountApproval.js'
 import Lead from '../models/Lead.js'
 import { getOrCreateCrmSettings } from '../models/CrmSettings.js'
 import { applyLifecycleUpdate, syncReferralForLead } from './leadController.js'
+import { notifyTelegramEvent, formatMoneyIN } from '../services/telegramService.js'
 
 // -------------------------------------------------------------
 // GET /api/discounts/approvals (Admin Only, Paginated by 30)
@@ -174,6 +175,23 @@ export const approveDiscountRequest = async (req, res) => {
     reqDoc.repNotificationRead = false
     await reqDoc.save()
 
+    // Notify requesting counselor via Telegram (non-blocking)
+    notifyTelegramEvent(
+      'discountApproved',
+      {
+        leadName: lead.fullName || reqDoc.leadName,
+        phone: lead.phone || reqDoc.leadPhone || 'N/A',
+        targetStatus: lead.leadStatus || reqDoc.targetStatus || '',
+        agreedAmount: formatMoneyIN(approvedAgreed),
+        discountAmount: formatMoneyIN(finalDiscount),
+        decidedBy: req.user?.name || 'Administrator',
+        remarks: String(adminRemarks || '').trim() || 'None',
+      },
+      {
+        targetUserIds: [reqDoc.requestedBy?.userId, lead.assignedTo?.repId].filter(Boolean),
+      }
+    )
+
     res.status(200).json({
       success: true,
       message: `Discount approved! Lead "${lead.fullName}" updated to ${lead.leadStatus}.`,
@@ -232,6 +250,21 @@ export const rejectDiscountRequest = async (req, res) => {
     reqDoc.adminRemarks = String(adminRemarks || '').trim()
     reqDoc.repNotificationRead = false
     await reqDoc.save()
+
+    // Notify requesting counselor via Telegram (non-blocking)
+    notifyTelegramEvent(
+      'discountRejected',
+      {
+        leadName: reqDoc.leadName || lead?.fullName || 'Lead',
+        phone: reqDoc.leadPhone || lead?.phone || 'N/A',
+        agreedAmount: formatMoneyIN(reqDoc.requestedAgreedAmount),
+        decidedBy: req.user?.name || 'Administrator',
+        remarks: String(adminRemarks || '').trim() || 'None',
+      },
+      {
+        targetUserIds: [reqDoc.requestedBy?.userId, lead?.assignedTo?.repId].filter(Boolean),
+      }
+    )
 
     res.status(200).json({
       success: true,

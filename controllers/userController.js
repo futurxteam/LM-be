@@ -2,6 +2,32 @@ import mongoose from 'mongoose'
 import User from '../models/User.js'
 import Lead from '../models/Lead.js'
 import { BUSINESS_STATUSES } from '../models/CrmSettings.js'
+import { sendTestTelegramAlert } from '../services/telegramService.js'
+
+const DEFAULT_USER_TELEGRAM_PREFS = {
+  newLead: true,
+  leadAssigned: true,
+  discountRequested: true,
+  discountDecision: true,
+  businessMilestone: true,
+}
+
+function normalizeUserTelegramPrefs(rawPrefs, existingPrefs = DEFAULT_USER_TELEGRAM_PREFS) {
+  const base = {
+    newLead: existingPrefs?.newLead !== false,
+    leadAssigned: existingPrefs?.leadAssigned !== false,
+    discountRequested: existingPrefs?.discountRequested !== false,
+    discountDecision: existingPrefs?.discountDecision !== false,
+    businessMilestone: existingPrefs?.businessMilestone !== false,
+  }
+  if (!rawPrefs || typeof rawPrefs !== 'object') return base
+  Object.keys(base).forEach(k => {
+    if (rawPrefs[k] !== undefined) {
+      base[k] = Boolean(rawPrefs[k])
+    }
+  })
+  return base
+}
 
 const TERMINAL_STATUSES = ['CONVERTED BUSINESS', 'ONBOARDED BUSINESS', 'NON PROSPECT', 'LOST']
 
@@ -173,6 +199,9 @@ export const getAllUsers = async (req, res) => {
           groupId: u.groupId || null,
           isGroupManager: Boolean(u.isGroupManager),
           receiveLeads: u.receiveLeads !== false,
+          telegramChatId: u.telegramChatId || '',
+          telegramNotificationsEnabled: Boolean(u.telegramNotificationsEnabled),
+          telegramPreferences: normalizeUserTelegramPrefs(u.telegramPreferences),
           totalAssigned,
           openAssignedCount,
           activeCount: openAssignedCount,
@@ -370,7 +399,18 @@ export const getUserHistory = async (req, res) => {
 // -------------------------------------------------------------
 export const createUser = async (req, res) => {
   try {
-    const { name, email, password, role, title, specialty, active } = req.body
+    const {
+      name,
+      email,
+      password,
+      role,
+      title,
+      specialty,
+      active,
+      telegramChatId,
+      telegramNotificationsEnabled,
+      telegramPreferences,
+    } = req.body
 
     if (!name || !name.trim()) {
       return res.status(400).json({ success: false, message: 'Name is required' })
@@ -390,6 +430,7 @@ export const createUser = async (req, res) => {
     const assignedTitle = title?.trim() || (assignedRole === 'admin' ? 'System Administrator' : 'Admissions Counselor')
     const assignedSpecialty = specialty?.trim() || 'Healthcare Admissions'
     const avatar = generateAvatar(name.trim())
+    const cleanChatId = String(telegramChatId || '').trim()
 
     const newUser = new User({
       name: name.trim(),
@@ -401,6 +442,9 @@ export const createUser = async (req, res) => {
       avatar,
       active: active !== false,
       disabledAt: active === false ? new Date() : null,
+      telegramChatId: cleanChatId,
+      telegramNotificationsEnabled: Boolean(telegramNotificationsEnabled && cleanChatId),
+      telegramPreferences: normalizeUserTelegramPrefs(telegramPreferences),
     })
 
     await newUser.save()
@@ -418,6 +462,9 @@ export const createUser = async (req, res) => {
         avatar: newUser.avatar,
         active: newUser.active,
         disabledAt: newUser.disabledAt,
+        telegramChatId: newUser.telegramChatId || '',
+        telegramNotificationsEnabled: Boolean(newUser.telegramNotificationsEnabled),
+        telegramPreferences: normalizeUserTelegramPrefs(newUser.telegramPreferences),
       },
     })
   } catch (error) {
@@ -431,7 +478,21 @@ export const createUser = async (req, res) => {
 export const updateUser = async (req, res) => {
   try {
     const { id } = req.params
-    const { name, email, password, role, title, specialty, active, groupId, isGroupManager, receiveLeads } = req.body
+    const {
+      name,
+      email,
+      password,
+      role,
+      title,
+      specialty,
+      active,
+      groupId,
+      isGroupManager,
+      receiveLeads,
+      telegramChatId,
+      telegramNotificationsEnabled,
+      telegramPreferences,
+    } = req.body
 
     const user = await User.findById(id)
     if (!user) {
@@ -496,6 +557,17 @@ export const updateUser = async (req, res) => {
       user.receiveLeads = Boolean(receiveLeads)
     }
 
+    if (telegramChatId !== undefined) {
+      user.telegramChatId = String(telegramChatId || '').trim()
+    }
+    if (telegramNotificationsEnabled !== undefined) {
+      user.telegramNotificationsEnabled = Boolean(telegramNotificationsEnabled)
+    }
+    if (telegramPreferences !== undefined && typeof telegramPreferences === 'object') {
+      user.telegramPreferences = normalizeUserTelegramPrefs(telegramPreferences, user.telegramPreferences)
+      user.markModified('telegramPreferences')
+    }
+
     await user.save()
 
     // If name or specialty updated, sync embedded advisor snapshots
@@ -535,7 +607,99 @@ export const updateUser = async (req, res) => {
         avatar: user.avatar,
         active: user.active,
         disabledAt: user.disabledAt,
+        telegramChatId: user.telegramChatId || '',
+        telegramNotificationsEnabled: Boolean(user.telegramNotificationsEnabled),
+        telegramPreferences: normalizeUserTelegramPrefs(user.telegramPreferences),
       },
+    })
+  } catch (error) {
+    res.status(500).json({ success: false, message: error.message })
+  }
+}
+
+// -------------------------------------------------------------
+// PATCH /api/users/:id/telegram - Quick update user Telegram notification settings
+// -------------------------------------------------------------
+export const updateUserTelegram = async (req, res) => {
+  try {
+    const { id } = req.params
+    const { telegramChatId, telegramNotificationsEnabled, telegramPreferences } = req.body || {}
+
+    const user = await User.findById(id)
+    if (!user) {
+      return res.status(404).json({ success: false, message: 'User not found' })
+    }
+
+    if (telegramChatId !== undefined) {
+      user.telegramChatId = String(telegramChatId || '').trim()
+    }
+    if (telegramNotificationsEnabled !== undefined) {
+      const nextEnabled = Boolean(telegramNotificationsEnabled)
+      if (nextEnabled && !String(user.telegramChatId || '').trim()) {
+        return res.status(400).json({
+          success: false,
+          message: `Please set a Telegram Chat ID for ${user.name} before enabling Telegram alerts.`,
+        })
+      }
+      user.telegramNotificationsEnabled = nextEnabled
+    }
+    if (telegramPreferences !== undefined && typeof telegramPreferences === 'object') {
+      user.telegramPreferences = normalizeUserTelegramPrefs(telegramPreferences, user.telegramPreferences)
+      user.markModified('telegramPreferences')
+    }
+
+    await user.save()
+
+    res.status(200).json({
+      success: true,
+      message: `Telegram alerts ${user.telegramNotificationsEnabled ? 'enabled' : 'disabled'} for ${user.name}.`,
+      user: {
+        id: user._id.toString(),
+        telegramChatId: user.telegramChatId || '',
+        telegramNotificationsEnabled: Boolean(user.telegramNotificationsEnabled),
+        telegramPreferences: normalizeUserTelegramPrefs(user.telegramPreferences),
+      },
+    })
+  } catch (error) {
+    res.status(500).json({ success: false, message: error.message })
+  }
+}
+
+// -------------------------------------------------------------
+// POST /api/users/:id/telegram/test - Send test Telegram message to a user
+// -------------------------------------------------------------
+export const testUserTelegram = async (req, res) => {
+  try {
+    const { id } = req.params
+    const { chatId } = req.body || {}
+    const user = await User.findById(id).lean()
+    if (!user) {
+      return res.status(404).json({ success: false, message: 'User not found' })
+    }
+
+    const targetChatId = String(chatId || user.telegramChatId || '').trim()
+    if (!targetChatId) {
+      return res.status(400).json({
+        success: false,
+        message: `No Telegram Chat ID configured for ${user.name}.`,
+      })
+    }
+
+    const result = await sendTestTelegramAlert({
+      chatId: targetChatId,
+      customTemplate: `Futureace Academy CRM — Test Alert\nHi ${user.name}, your Telegram notifications are connected successfully!`,
+    })
+
+    if (!result.ok) {
+      return res.status(400).json({
+        success: false,
+        message: `Telegram test failed: ${result.error}`,
+      })
+    }
+
+    res.status(200).json({
+      success: true,
+      message: `Test Telegram message delivered to ${user.name}!`,
     })
   } catch (error) {
     res.status(500).json({ success: false, message: error.message })

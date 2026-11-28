@@ -10,6 +10,8 @@ import { requireAdminOrManager, requireAuth } from '../middleware/authMiddleware
 
 const router = express.Router()
 
+router.use(requireAuth)
+
 router.get('/', getStats)
 router.get('/advanced', requireAdminOrManager, getAdvancedReports)
 router.get('/frd-reports', requireAuth, getFrdReports)

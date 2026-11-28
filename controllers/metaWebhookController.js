@@ -4,6 +4,7 @@ import Lead from '../models/Lead.js'
 import { extractLeadFromRow, sanitizePhone } from '../utils/leadParser.js'
 import { sendTelegramLeadAlert, sendWebhookLeadAlert } from '../services/metaLeadService.js'
 import { allocateLead } from '../services/allocationService.js'
+import { notifyTelegramEvent } from '../services/telegramService.js'
 
 export const WEBHOOK_VERIFY_TOKEN =
   process.env.META_WEBHOOK_VERIFY_TOKEN || 'futureace_leadgen_webhook_2026'
@@ -263,7 +264,32 @@ async function processLiveLead(leadgenId, formId, pageId) {
     }
     console.log('='.repeat(68) + '\n')
 
-    // 5. Send Alerts
+    // 5. Send Alerts (Meta integration + CRM User Telegram Notification Engine)
+    notifyTelegramEvent(
+      'newLead',
+      {
+        leadName: savedLead.fullName || 'Meta Lead',
+        phone: savedLead.phone || 'N/A',
+        course: savedLead.courseProgram || formName || 'Meta Inquiry',
+        source: `Meta Live Webhook (${formName})`,
+        assignedTo: savedLead.assignedTo?.repName || 'System Pool (Unassigned)',
+      },
+      { notifyAdmins: true }
+    )
+    if (savedLead.assignedTo?.repId) {
+      notifyTelegramEvent(
+        'leadAssigned',
+        {
+          leadName: savedLead.fullName || 'Meta Lead',
+          phone: savedLead.phone || 'N/A',
+          course: savedLead.courseProgram || formName || 'Meta Inquiry',
+          assignedBy: 'Meta Auto-Allocation',
+          count: '1',
+        },
+        { targetUserIds: [savedLead.assignedTo.repId.toString()] }
+      )
+    }
+
     if (config) {
       try {
         await sendTelegramLeadAlert(config, savedLead)

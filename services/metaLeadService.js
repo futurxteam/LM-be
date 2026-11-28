@@ -3,6 +3,7 @@ import MetaIntegration from '../models/MetaIntegration.js'
 import Lead from '../models/Lead.js'
 import { extractLeadFromRow, sanitizePhone } from '../utils/leadParser.js'
 import { allocateLead } from './allocationService.js'
+import { notifyTelegramEvent } from './telegramService.js'
 
 /**
  * Send alert message to Telegram Bot if enabled
@@ -241,7 +242,18 @@ export async function syncMetaLeads(manualToken, manualPageId, forceFullSync = f
         totalNewLeadsCount++
         newlyIngestedLeads.push(savedLead)
 
-        // Dispatch alerts
+        // Dispatch alerts (CRM Telegram Engine + Meta config alerts)
+        notifyTelegramEvent(
+          'newLead',
+          {
+            leadName: savedLead.fullName || 'Meta Lead',
+            phone: savedLead.phone || 'N/A',
+            course: savedLead.courseProgram || form.formName || 'Meta Inquiry',
+            source: `Meta Sync (${form.formName})`,
+            assignedTo: savedLead.assignedTo?.repName || 'System Pool (Unassigned)',
+          },
+          { notifyAdmins: true }
+        )
         if (config) {
           await sendTelegramLeadAlert(config, savedLead)
           await sendWebhookLeadAlert(config, savedLead)

@@ -18,6 +18,7 @@ import { isLeadAssignedToUser } from '../middleware/authMiddleware.js'
 import { parseLeadsData, sanitizePhone } from '../utils/leadParser.js'
 import { allocateLead } from '../services/allocationService.js'
 import { isCounselorPaused } from '../utils/counselorUtils.js'
+import { notifyTelegramEvent, formatMoneyIN } from '../services/telegramService.js'
 
 /**
  * Escape special regex characters so phone numbers with '+' or symbols never crash RegExp
@@ -807,7 +808,7 @@ export const getLeads = async (req, res) => {
       limit,
     } = req.query
 
-    const callerRole = req.user?.role || (role === 'admin' ? 'admin' : 'sales')
+    const callerRole = req.user?.role || 'sales'
     const andConditions = []
 
     // Remove LOST leads from Sales Rep active queue & Team view (Admin sees them in Lost Business & Master list)
@@ -1450,6 +1451,31 @@ export const assignLeads = async (req, res) => {
       }
     )
 
+    if (updateResult.modifiedCount > 0) {
+      let leadLabel = `${updateResult.modifiedCount} Lead(s)`
+      let leadPhone = 'Multiple'
+      let leadCourse = 'Various'
+      if (updateResult.modifiedCount === 1 && !isEntirePool && Array.isArray(leadIds) && leadIds.length === 1) {
+        const singleLead = await Lead.findById(leadIds[0]).select('fullName phone courseProgram').lean()
+        if (singleLead) {
+          leadLabel = singleLead.fullName || leadLabel
+          leadPhone = singleLead.phone || 'N/A'
+          leadCourse = singleLead.courseProgram || 'Not Specified'
+        }
+      }
+      notifyTelegramEvent(
+        'leadAssigned',
+        {
+          leadName: leadLabel,
+          phone: leadPhone,
+          course: leadCourse,
+          assignedBy: req.user?.name || 'Administrator',
+          count: String(updateResult.modifiedCount),
+        },
+        { targetUserIds: [rep._id.toString()] }
+      )
+    }
+
     res.status(200).json({
       success: true,
       message: `Successfully assigned ${updateResult.modifiedCount} lead(s) to ${rep.name}`,
@@ -1561,6 +1587,27 @@ export const autoAssignLeads = async (req, res) => {
 
     const bulkResult = await Lead.bulkWrite(bulkOps, { ordered: false })
     const assignedCount = bulkResult.modifiedCount ?? targetLeads.length
+
+    // Notify each rep who received auto-assigned leads
+    if (assignedCount > 0 && Array.isArray(activeReps)) {
+      for (const rep of activeReps) {
+        const repKey = rep.name
+        const repCount = distribution?.[repKey] || 0
+        if (repCount > 0) {
+          notifyTelegramEvent(
+            'leadAssigned',
+            {
+              leadName: `${repCount} Auto-Assigned Lead${repCount === 1 ? '' : 's'}`,
+              phone: 'Check CRM Queue',
+              course: 'Round-Robin Allocation',
+              assignedBy: req.user?.name || 'Auto Round-Robin',
+              count: String(repCount),
+            },
+            { targetUserIds: [rep._id.toString()] }
+          )
+        }
+      }
+    }
 
     res.status(200).json({
       success: true,
@@ -1816,6 +1863,22 @@ export const updateLeadStatus = async (req, res) => {
             })
             await lead.save()
 
+            // Alert Admins via Telegram about pending discount approval request
+            notifyTelegramEvent(
+              'discountRequested',
+              {
+                leadName: lead.fullName || 'Lead',
+                phone: lead.phone || 'N/A',
+                course: approvalDoc.programName || lead.courseProgram || 'Not Specified',
+                standardFee: formatMoneyIN(stdFee),
+                agreedAmount: formatMoneyIN(reqAgreed),
+                discountAmount: formatMoneyIN(reqDiscount),
+                reason: `${cleanReason}${cleanReasonDesc ? ` (${cleanReasonDesc})` : ''}`,
+                requestedBy: actor?.name || body.author || 'Staff',
+              },
+              { notifyAdmins: true }
+            )
+
             const formatted = sanitizeLeadForRole(lead, actor?.role || 'sales')
             return res.status(200).json({
               success: true,
@@ -1829,6 +1892,7 @@ export const updateLeadStatus = async (req, res) => {
       }
     }
 
+    const prevStatusBeforeUpdate = lead.leadStatus
     const result = await applyLifecycleUpdate(lead, body, actor, settings)
     if (result.error) {
       return res.status(result.statusCode || 400).json({
@@ -1839,6 +1903,31 @@ export const updateLeadStatus = async (req, res) => {
 
     await lead.save()
     await syncReferralForLead(lead)
+
+    // Alert Admins via Telegram when a lead reaches a Business Milestone
+    if (
+      BUSINESS_STATUSES.includes(lead.leadStatus) &&
+      lead.leadStatus !== prevStatusBeforeUpdate
+    ) {
+      const effectiveAgreed =
+        lead.agreedAmount !== null && lead.agreedAmount !== undefined
+          ? lead.agreedAmount
+          : lead.courseFees
+      notifyTelegramEvent(
+        'businessMilestone',
+        {
+          status: lead.leadStatus,
+          leadName: lead.fullName || 'Lead',
+          phone: lead.phone || 'N/A',
+          course: lead.businessProgramName || lead.courseProgram || 'Not Specified',
+          agreedAmount: formatMoneyIN(effectiveAgreed),
+          paidAmount: formatMoneyIN(lead.paidAmount),
+          assignedTo: lead.assignedTo?.repName || actor?.name || 'Unassigned',
+        },
+        { notifyAdmins: true }
+      )
+    }
+
     const formatted = sanitizeLeadForRole(lead, actor?.role || 'sales')
 
     res.status(200).json({
@@ -2112,6 +2201,21 @@ export const recycleLead = async (req, res) => {
     })
 
     await lead.save()
+
+    if (assignedRep && assignedRep._id) {
+      notifyTelegramEvent(
+        'leadAssigned',
+        {
+          leadName: `${lead.fullName} (Recycled Cycle #${lead.cycleNumber})`,
+          phone: lead.phone || 'N/A',
+          course: lead.courseProgram || 'Not Specified',
+          assignedBy: actorInfo.name || 'Administrator',
+          count: '1',
+        },
+        { targetUserIds: [assignedRep._id.toString()] }
+      )
+    }
+
     res.status(200).json({
       success: true,
       message: `Lead "${lead.fullName}" recycled into ${destinationText} (Cycle #${lead.cycleNumber}).`,
@@ -2532,6 +2636,35 @@ export const createLead = async (req, res) => {
       } catch (refErr) {
         console.error('[createLead] Error saving referral link:', refErr)
       }
+    }
+
+    // Dispatch Telegram notifications for newly created lead
+    notifyTelegramEvent(
+      'newLead',
+      {
+        leadName: saved.fullName || 'New Lead',
+        phone: saved.phone || 'N/A',
+        course: saved.courseProgram || 'Not Specified',
+        source: saved.platform || 'Manual Entry',
+        assignedTo: saved.assignedTo?.repName || 'System Pool (Unassigned)',
+      },
+      { notifyAdmins: true }
+    )
+    if (
+      saved.assignedTo?.repId &&
+      String(saved.assignedTo.repId) !== String(req.user?.id || req.user?._id || '')
+    ) {
+      notifyTelegramEvent(
+        'leadAssigned',
+        {
+          leadName: saved.fullName || 'New Lead',
+          phone: saved.phone || 'N/A',
+          course: saved.courseProgram || 'Not Specified',
+          assignedBy: req.user?.name || author || 'Admin',
+          count: '1',
+        },
+        { targetUserIds: [saved.assignedTo.repId.toString()] }
+      )
     }
 
     res.status(201).json({

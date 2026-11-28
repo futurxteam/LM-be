@@ -6,7 +6,11 @@ import {
   deleteGroup,
 } from '../controllers/groupController.js'
 
+import { requireAdmin } from '../middleware/authMiddleware.js'
+
 const router = express.Router()
+
+router.use(requireAdmin)
 
 router.get('/', getAllGroups)
 router.post('/', createGroup)

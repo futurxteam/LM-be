@@ -80,6 +80,21 @@ export const DEFAULT_LOST_REASONS = [
   'Trust / Credibility Concern',
 ]
 
+export const DEFAULT_TELEGRAM_TEMPLATES = {
+  newLead:
+    'New Lead Captured\nName: {{leadName}}\nPhone: {{phone}}\nCourse: {{course}}\nSource: {{source}}\nAssigned To: {{assignedTo}}',
+  leadAssigned:
+    'Lead Assigned to You\nLead: {{leadName}} ({{phone}})\nCourse: {{course}}\nAssigned By: {{assignedBy}}',
+  discountRequested:
+    'Discount Approval Requested\nLead: {{leadName}} ({{phone}})\nCourse: {{course}}\nStandard Fee: ₹{{standardFee}}\nRequested Agreed: ₹{{agreedAmount}} (Discount: ₹{{discountAmount}})\nReason: {{reason}}\nRequested By: {{requestedBy}}',
+  discountApproved:
+    'Discount Approved by Admin\nLead: {{leadName}} ({{phone}})\nTarget Status: {{targetStatus}}\nFinal Agreed: ₹{{agreedAmount}} (Discount: ₹{{discountAmount}})\nApproved By: {{decidedBy}}\nRemarks: {{remarks}}',
+  discountRejected:
+    'Discount Request Rejected\nLead: {{leadName}} ({{phone}})\nRequested Agreed: ₹{{agreedAmount}}\nRejected By: {{decidedBy}}\nRemarks: {{remarks}}',
+  businessMilestone:
+    'Business Milestone: {{status}}\nLead: {{leadName}} ({{phone}})\nCourse: {{course}}\nAgreed Fee: ₹{{agreedAmount}} | Paid: ₹{{paidAmount}}\nCounselor: {{assignedTo}}',
+}
+
 const LEGACY_LOST_REASONS_SIGNATURE = 'Fee / Budget Issue'
 
 const outcomeCategorySchema = new mongoose.Schema(
@@ -108,6 +123,25 @@ const crmSettingsSchema = new mongoose.Schema(
     allowSalesFinancialEdit: { type: Boolean, default: true },
     outcomeCategories: { type: [outcomeCategorySchema], default: () => DEFAULT_OUTCOME_CATEGORIES },
     lostReasons: { type: [String], default: () => DEFAULT_LOST_REASONS },
+    telegramSettings: {
+      enabled: { type: Boolean, default: true },
+      events: {
+        newLead: { type: Boolean, default: true },
+        leadAssigned: { type: Boolean, default: true },
+        discountRequested: { type: Boolean, default: true },
+        discountApproved: { type: Boolean, default: true },
+        discountRejected: { type: Boolean, default: true },
+        businessMilestone: { type: Boolean, default: true },
+      },
+      templates: {
+        newLead: { type: String, default: DEFAULT_TELEGRAM_TEMPLATES.newLead },
+        leadAssigned: { type: String, default: DEFAULT_TELEGRAM_TEMPLATES.leadAssigned },
+        discountRequested: { type: String, default: DEFAULT_TELEGRAM_TEMPLATES.discountRequested },
+        discountApproved: { type: String, default: DEFAULT_TELEGRAM_TEMPLATES.discountApproved },
+        discountRejected: { type: String, default: DEFAULT_TELEGRAM_TEMPLATES.discountRejected },
+        businessMilestone: { type: String, default: DEFAULT_TELEGRAM_TEMPLATES.businessMilestone },
+      },
+    },
   },
   { timestamps: true }
 )

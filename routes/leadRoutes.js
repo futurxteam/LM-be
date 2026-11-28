@@ -21,9 +21,12 @@ import {
   createLead,
   resetLeadDatabase,
 } from '../controllers/leadController.js'
-import { requireAdmin } from '../middleware/authMiddleware.js'
+import { requireAdmin, requireAuth } from '../middleware/authMiddleware.js'
 
 const router = express.Router()
+
+// Every lead endpoint requires a valid, active user in MongoDB
+router.use(requireAuth)
 
 // Multer memory storage configuration for file uploads (xlsx, xls, csv, tsv)
 const storage = multer.memoryStorage()
@@ -55,13 +58,13 @@ router.get('/reps', getSalesRepsList)
 
 // Create & Ingestion
 router.post('/', createLead)
-router.post('/upload', upload.single('file'), uploadLeads)
-router.post('/paste', pasteLeads)
+router.post('/upload', requireAdmin, upload.single('file'), uploadLeads)
+router.post('/paste', requireAdmin, pasteLeads)
 
 // Assignment Engine
-router.post('/assign', assignLeads)
-router.post('/auto-assign', autoAssignLeads)
-router.post('/unassign', unassignLeads)
+router.post('/assign', requireAdmin, assignLeads)
+router.post('/auto-assign', requireAdmin, autoAssignLeads)
+router.post('/unassign', requireAdmin, unassignLeads)
 
 // Status, Steps & Lost Recycling
 router.get('/:id', getLeadById)
@@ -76,6 +79,6 @@ router.patch('/:id/profile', updateLeadProfile)
 router.delete('/:id', requireAdmin, deleteLead)
 
 // Temporary Reset / Clean Lead Database Tool
-router.post('/reset-db', resetLeadDatabase)
+router.post('/reset-db', requireAdmin, resetLeadDatabase)
 
 export default router
